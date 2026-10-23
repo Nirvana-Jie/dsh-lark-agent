@@ -13,13 +13,13 @@
     "larksuite",
     "chatbot"
   ],
-  "homepage": "https://github.com/Nirvana-Jie/dsh-larkbot#readme",
+  "homepage": "https://github.com/Nirvana-Jie/dsh-lark-agent#readme",
   "bugs": {
-    "url": "https://github.com/Nirvana-Jie/dsh-larkbot/issues"
+    "url": "https://github.com/Nirvana-Jie/dsh-lark-agent/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Nirvana-Jie/dsh-larkbot.git"
+    "url": "git+https://github.com/Nirvana-Jie/dsh-lark-agent.git"
   },
   "author": "Nirvana-Jie",
   "type": "module",

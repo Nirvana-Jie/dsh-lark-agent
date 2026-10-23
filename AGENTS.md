@@ -1,4 +1,4 @@
-# dsh-larkbot 代理工作规则
+# dsh-lark-agent 代理工作规则
 
 这是 TypeScript ESM 的 dsh / Cordis 飞书插件，包含宿主服务和 Web / App 设置界面。飞书是个人助手的移动入口：通道历史独立，记忆在后台工作；选择旧话题、确认操作和复杂结果才使用卡片。[README.md](README.md)（英文）与 [README_zh.md](README_zh.md)（中文）只介绍能做什么和如何安装接入；命令、隐私、升级、部署、运维、排障与开发以 [DEVELOPMENT.md](DEVELOPMENT.md)（使用与开发文档）为准。
 
@@ -47,6 +47,7 @@
 - 自动接入仅授权本人私聊，`groupChats: []`、`allowedTools: []`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
 - 双宿主通过公开能力适配。保留 legacy persona/readFrom 与 modern prefix/snapshotEvents/open-read 的分支；现代 required cwd 取自当前 Agent。更新 peer 范围前，在对应真实宿主依赖上验证，不能只改版本字符串或跳过安全能力。
 - 自动接入状态按宿主代际及 home 分目录；原生持久化跟随宿主。跨代迁移需明确验证，不复用旧后台状态或混写原生日志。
+- 项目、仓库与 npm 包名为 `dsh-lark-agent`；插件 ID 与日志前缀 `im-larkbot`、数据目录 `~/.dsh-larkbot/`、RPC 路径 `larkbot`、设置页与样式 ID、应用注册来源、launchd 标签和构建环境变量沿用旧名。改这些运行标识会让已有安装丢失配置、状态或后台服务，或破坏设置页与宿主的契约，须先设计并验证迁移。
 - 模型目录与思考档位来自宿主公开接口。选择按用户／聊天／话题保存，首次捕获完整默认值；切换时保留原生会话，不修改宿主全局默认。按钮绑定设置 revision，执行前重新校验可用选项；保存结果不确定时停止推理。
 - 目录展示可以短时缓存和合并并发读取；实际切换仍实时校验。加载卡只更新已确认创建的消息，创建或更新结果未知时不另发 fallback、不重跑命令。群回复继续经过记忆授权检查。
 - 菜单事件没有消息 ID 或聊天 ID。仅接受固定 event key，以结构化 operator 身份查找已验证的私聊，再向该 open ID 发送；不能伪造 reply message ID。配对私聊映射在服务取得两把锁后写入。菜单订阅与菜单定义分别配置，发布后预检成功才启用接收。

@@ -1,6 +1,6 @@
-<img src="assets/plugin-icon.png" width="80" align="right" alt="dsh-larkbot 图标">
+<img src="assets/plugin-icon.png" width="80" align="right" alt="dsh-lark-agent 图标">
 
-# dsh-larkbot
+# dsh-lark-agent
 
 [English](README.md)
 
@@ -8,9 +8,9 @@
 
 **离开电脑，也能在飞书里找到你的 [DeepSeek Harness](https://www.deepseek.com/harness/) 助手。**
 
-dsh-larkbot（npm 包名 [`dsh-lark-agent`](https://www.npmjs.com/package/dsh-lark-agent)）给运行中的 DeepSeek Harness 加一个飞书私聊入口：在手机上交代需求、讨论方案、继续之前的话题。飞书使用独立会话，不接管桌面或 Web 中已有的聊天。
+dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：在手机上交代需求、讨论方案、继续之前的话题。飞书使用独立会话，不接管桌面或 Web 中已有的聊天。
 
-[![dsh-larkbot 交互示意（飞书聊天用演示数据重绘，非实录）：从 Harness 设置页进入飞书私聊，收到图表与表单卡片](assets/readme/intro.gif)](assets/readme/intro.mp4)
+[![dsh-lark-agent 交互示意（飞书聊天用演示数据重绘，非实录）：从 Harness 设置页进入飞书私聊，收到图表与表单卡片](assets/readme/intro.gif)](assets/readme/intro.mp4)
 
 ## 安装 / 更新
 
