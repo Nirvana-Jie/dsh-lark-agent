@@ -154,6 +154,8 @@ App 路由契约（[client-modern-host](tests/client-modern-host.test.tsx) 测�
 
 **从源码安装：** `pnpm pack` 经 `prepack` 构建 `dist/` 后打包，最后一行输出 tgz 文件名；安装时用 tgz 的绝对路径代替包名（App「添加插件」或 `dsh plugin --profile web add <tgz 绝对路径> --allow-build=protobufjs`），运行中重建见[备份、升级与迁移](#备份升级与迁移)。
 
+**发布 npm：** 维护者在 `main` 上更新版本（如 `pnpm version patch`，生成 `v<版本>` 提交与标签），按 AGENTS.md 完成发布前检查后 `git push --follow-tags`。[release.yml](.github/workflows/release.yml) 校验标签与 `package.json` 版本一致且在 `main` 上，运行 `pnpm check`、构建并核对包内文件，再经 npm Trusted Publishing（OIDC，仓库不存 npm token）发布并附来源证明：含 `-` 的预发布版本发到 `next`，其余发到 `latest`；最后创建 GitHub Release。npm 上已有的版本只补建 Release，不重复发布。工作流依赖 npm 包设置中的 Trusted Publisher（仓库 `Nirvana-Jie/dsh-larkbot`、工作流 `release.yml`）。
+
 **图标与媒体：** 替换图标时保持比例与透明背景；文档媒体（README 与本文）放 `assets/readme/`，在 `package.json` 的 `files` 中逐个列出。
 
 ## 扫码接入

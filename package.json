@@ -1,7 +1,27 @@
 {
   "name": "dsh-larkbot",
   "version": "0.1.0",
-  "description": "Team Lark/Feishu channel for deepseek-harness, using the official Lark CLI",
+  "description": "Reach your DeepSeek Harness assistant from Feishu / Lark: a dsh plugin built on the official Lark CLI",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "feishu",
+    "lark",
+    "larksuite",
+    "chatbot"
+  ],
+  "homepage": "https://github.com/Nirvana-Jie/dsh-larkbot#readme",
+  "bugs": {
+    "url": "https://github.com/Nirvana-Jie/dsh-larkbot/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nirvana-Jie/dsh-larkbot.git"
+  },
+  "author": "Nirvana-Jie",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -101,6 +121,9 @@
     "vitest": "4.1.12"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.76.0",
     "qrcode": "1.5.4"
