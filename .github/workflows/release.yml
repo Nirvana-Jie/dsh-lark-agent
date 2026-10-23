@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# One run per tag; never cancel a publish midway.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # npm Trusted Publishing (OIDC) and provenance; no npm token is stored
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      # No registry-url: npm's default registry plus OIDC needs no .npmrc token.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      # Trusted Publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@11
+      - name: Check the tag
+        id: release
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+          case "$version" in *-*) channel=next ;; *) channel=latest ;; esac
+          # A version already on npm (such as a manual first publish) only gets its GitHub Release.
+          if npm view "dsh-larkbot@$version" version >/dev/null 2>&1; then published=true; else published=false; fi
+          {
+            echo "channel=$channel"
+            echo "published=$published"
+          } >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+      - name: Check the package contents
+        run: |
+          npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const files = require(process.argv[1])[0].files.map(file => file.path);
+            const missing = ["dist/index.js", "dist/client.cjs", "README.md", "LICENSE"].filter(path => !files.includes(path));
+            const unexpected = files.filter(path => /^(docs|\.runtime|src|tests)\//.test(path) || /^team\.config\.(?!example\.json$)/.test(path));
+            if (missing.length || unexpected.length) throw new Error(`missing: ${missing}; unexpected: ${unexpected}`);
+          ' "$RUNNER_TEMP/pack.json"
+      - name: Publish to npm
+        if: steps.release.outputs.published == 'false'
+        run: npm publish --ignore-scripts --provenance --access public --tag "${{ steps.release.outputs.channel }}"
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.release.outputs.channel }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then exit 0; fi
+          flags=(--verify-tag --generate-notes)
+          if [ "$CHANNEL" = next ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}"
