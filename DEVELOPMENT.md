@@ -83,7 +83,7 @@
 
 1. 设置页「暂停连接」。
 2. 按[备份清单](#备份升级与迁移)备份 `~/.dsh-larkbot/`（设了插件 `dataDir` 时为该目录）与宿主的原生会话目录。
-3. 安装新版：Web 运行 `dsh plugin --profile web update dsh-larkbot@latest` 并重启 `dsh web`；App 按「添加插件」弹窗提示，先在插件页卸载旧版 `dsh-larkbot`，再添加 `dsh-larkbot`（App 内升级尚未实机验证）。
+3. 安装新版：Web 运行 `dsh plugin --profile web update dsh-lark-agent@latest` 并重启 `dsh web`；App 按「添加插件」弹窗提示，先在插件页卸载旧版 `dsh-lark-agent`（更早从源码安装的显示为 `dsh-larkbot`），再添加 `dsh-lark-agent`（App 内升级尚未实机验证）。
 4. 「恢复连接」，确认收到实际回复。
 
 ## 私聊底部菜单
@@ -269,7 +269,7 @@ dsh --profile feishu-team --dump-config > .runtime/composed.yml
 
 - 转储须含 `im-larkbot`、`agent`、`tools`、`session-persistence-jsonl`（自定义 profile 默认带 `@deepseek-ai/dsh-base`），可能含敏感信息，只留在 `.runtime/`。
 - 插件依赖宿主服务 `agents`、`tools`、`sessions`、`sessionPersistence`。自定义配置写到 `$DSH_HOME/profiles/feishu-team/cordis.patch.yml`（不改启动时重建的 `cordis.yml`），并保留 JSONL 持久化后端。
-- 改用已发布的包：`dsh plugin --profile feishu-team add dsh-larkbot --allow-build=protobufjs`；或 `pnpm pack` 后用 tgz 的绝对路径（如 `/absolute/path/to/dsh-larkbot-0.1.0.tgz`）代替包名。不带 `--allow-build=protobufjs` 时 pnpm 11 会以 `ERR_PNPM_IGNORED_BUILDS` 失败、插件不会加入 profile，可再运行 `dsh plugin --profile feishu-team approve-builds '!protobufjs'` 补救。包内不含 `scripts/`，只能用通用启动命令。
+- 改用已发布的包：`dsh plugin --profile feishu-team add dsh-lark-agent --allow-build=protobufjs`；或 `pnpm pack` 后用 tgz 的绝对路径（如 `/absolute/path/to/dsh-lark-agent-0.1.0.tgz`）代替包名。不带 `--allow-build=protobufjs` 时 pnpm 11 会以 `ERR_PNPM_IGNORED_BUILDS` 失败、插件不会加入 profile，可再运行 `dsh plugin --profile feishu-team approve-builds '!protobufjs'` 补救。包内不含 `scripts/`，只能用通用启动命令。
 
 ### 4. 启动与验收
 

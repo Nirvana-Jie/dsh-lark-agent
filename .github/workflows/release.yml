@@ -37,6 +37,7 @@ jobs:
       - name: Check the tag
         id: release
         run: |
+          name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
           if [ "$GITHUB_REF_NAME" != "v$version" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
@@ -48,7 +49,7 @@ jobs:
           fi
           case "$version" in *-*) channel=next ;; *) channel=latest ;; esac
           # A version already on npm (such as a manual first publish) only gets its GitHub Release.
-          if npm view "dsh-larkbot@$version" version >/dev/null 2>&1; then published=true; else published=false; fi
+          if npm view "$name@$version" version >/dev/null 2>&1; then published=true; else published=false; fi
           {
             echo "channel=$channel"
             echo "published=$published"
