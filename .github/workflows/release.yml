@@ -61,10 +61,13 @@ jobs:
         run: |
           npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/pack.json"
           node -e '
-            const files = require(process.argv[1])[0].files.map(file => file.path);
-            const missing = ["dist/index.js", "dist/client.cjs", "README.md", "LICENSE"].filter(path => !files.includes(path));
-            const unexpected = files.filter(path => /^(docs|\.runtime|src|tests)\//.test(path) || /^team\.config\.(?!example\.json$)/.test(path));
+            const [pack] = require(process.argv[1]);
+            const files = pack.files.map(file => file.path);
+            const missing = ["dist/index.js", "dist/client.cjs", "cordis.patch.yml", "README.md", "LICENSE"].filter(path => !files.includes(path));
+            // Only runtime files ship: docs and media stay in the repository.
+            const unexpected = files.filter(path => /^(assets|docs|\.runtime|src|tests)\//.test(path) || path.endsWith(".map") || /^team\.config\./.test(path));
             if (missing.length || unexpected.length) throw new Error(`missing: ${missing}; unexpected: ${unexpected}`);
+            if (pack.unpackedSize > 1024 * 1024) throw new Error(`unpacked size ${pack.unpackedSize} exceeds 1 MiB`);
           ' "$RUNNER_TEMP/pack.json"
       - name: Publish to npm
         if: steps.release.outputs.published == 'false'
