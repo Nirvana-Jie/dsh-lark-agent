@@ -7,7 +7,8 @@ type Client = {
   start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>;
 };
 const mocks = vi.hoisted(() => ({clients: [] as Client[], release: vi.fn(), accept: vi.fn(),
-  bridgeStop: vi.fn(), sweep: vi.fn(), cardReady: vi.fn(), directOpen: vi.fn(), directRecord: vi.fn(), acquire: vi.fn(), preferencesOpen: vi.fn()}));
+  bridgeStop: vi.fn(), sweep: vi.fn(), cardReady: vi.fn(), directOpen: vi.fn(), directRecord: vi.fn(), acquire: vi.fn(), preferencesOpen: vi.fn(),
+  consumers: vi.fn()}));
 vi.mock('../src/lock.js', () => ({acquireLock: mocks.acquire}));
 vi.mock('../src/ledger.js', () => ({DiskLedger: {open: async () => ({})}}));
 vi.mock('../src/session-store.js', () => ({SessionStore: {open: async () => ({})}}));
@@ -24,7 +25,7 @@ vi.mock('../src/lark-cli.js', () => ({LarkCli: class {
   start = vi.fn().mockResolvedValue(undefined);
   stop = vi.fn().mockResolvedValue(undefined);
   constructor(public options: Client['options']) {mocks.clients.push(this);}
-}}));
+}, noActiveConsumers: mocks.consumers}));
 import {createBotService, type BotService} from '../src/bot-service.js';
 
 const services: BotService[] = [];
@@ -243,6 +244,16 @@ describe('aggregate bot connection readiness', () => {
     await settle(); expect(mocks.release).not.toHaveBeenCalled();
     pending.resolve(); await failed;
     expect(mocks.release).toHaveBeenCalledTimes(2); expect(mocks.clients).toHaveLength(0);
+  });
+
+  it('takes over an exited owner\'s bot lease only after its profile reports no active consumers', async () => {
+    mocks.consumers.mockResolvedValue(false);
+    await fixture();
+    const [state, lease] = mocks.acquire.mock.calls;
+    expect(state).toEqual(['/test/state']);
+    expect(lease![0]).toMatch(/[\\/]\.dsh-larkbot[\\/]leases[\\/][0-9a-f]{64}$/);
+    await expect((lease![1] as {takeover: () => Promise<boolean>}).takeover()).resolves.toBe(false);
+    expect(mocks.consumers).toHaveBeenCalledExactlyOnceWith({profile: 'fixture', executable: 'lark-cli'});
   });
 
   it('seeds a verified paired private chat only after both leases, before creating receivers', async () => {

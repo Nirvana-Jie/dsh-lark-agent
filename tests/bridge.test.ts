@@ -128,6 +128,22 @@ describe('BotBridge execution and identity boundaries', () => {
     await h.bridge.stop();
   });
 
+  it('continues the current conversation for a quote reply instead of opening an empty one', async () => {
+    const h = harness();
+    // A Lark quote reply carries root_id/reply_to but no thread_id.
+    await h.bridge.accept(h.event('direct'));
+    await h.bridge.accept(h.event('direct quote reply', {root_id: 'om_1', reply_to: 'om_bot_answer'}));
+    await h.bridge.accept(h.group('group'));
+    await h.bridge.accept(h.group('group quote reply', {root_id: 'om_3', reply_to: 'om_bot_answer'}));
+    await h.bridge.accept(h.event('real thread', {thread_id: 'omt_topic', root_id: 'om_1'}));
+    expect(h.create).toHaveBeenCalledTimes(3);
+    expect(h.sessions[0]!.run.mock.calls.map(([text]) => text)).toEqual(['direct', 'direct quote reply']);
+    expect(h.sessions[1]!.run.mock.calls.map(([text]) => text)).toEqual(['group', 'group quote reply']);
+    // Replying in thread would turn a quote reply into a Lark thread with a new conversation key.
+    expect(h.replies.mock.calls.map(([, , options]) => options.inThread)).toEqual([false, false, false, false, true]);
+    await h.bridge.stop();
+  });
+
   it('ignores unauthorized users/groups, another bot mention and bot echoes without claiming or replying', async () => {
     const h = harness();
     await h.bridge.accept(h.event('unknown', {sender_id: 'ou_unknown'}));

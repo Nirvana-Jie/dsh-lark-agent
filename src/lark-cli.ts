@@ -56,6 +56,48 @@ function lines(limit: number, onLine: (line: string) => void, onOverflow: () => 
   };
 }
 
+/**
+ * True only for `lark-cli event status --current --json` output (larksuite/cli
+ * cmd/event/status.go) showing this app's bus stopped, or running without consumers.
+ * An orphan bus cannot be queried, so its consumers are unknown.
+ */
+export function consumerFree(value: unknown): boolean {
+  const apps = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>).apps : undefined;
+  if (!Array.isArray(apps) || apps.length !== 1 || !apps[0] || typeof apps[0] !== 'object' || Array.isArray(apps[0])) return false;
+  const app = apps[0] as Record<string, unknown>;
+  if (app.status === 'not_running') return true;
+  return app.status === 'running' && (app.active_consumers === undefined || app.active_consumers === 0)
+    && (app.consumers === undefined || (Array.isArray(app.consumers) && app.consumers.length === 0));
+}
+
+/** Ask the bot profile's CLI whether any process still consumes this app's events; any doubt is "no". */
+export function noActiveConsumers(options: {profile: string; executable?: string; timeoutMs?: number}): Promise<boolean> {
+  return new Promise(resolve => {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(options.executable ?? 'lark-cli', ['--profile', options.profile, 'event', 'status', '--current', '--json'],
+        {shell: false, windowsHide: true, stdio: 'pipe'});
+    } catch {resolve(false); return;}
+    const chunks: Buffer[] = [];
+    let size = 0, settled = false;
+    const finish = (free: boolean) => {if (!settled) {settled = true; clearTimeout(timer); resolve(free);}};
+    const abandon = () => {finish(false); child.kill('SIGTERM');};
+    const timer = setTimeout(abandon, options.timeoutMs ?? 10_000);
+    child.stdout.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 65_536) abandon(); else chunks.push(chunk);
+    });
+    child.stderr.resume();
+    child.stdin.on('error', () => undefined);
+    child.on('error', () => finish(false));
+    child.on('close', code => {
+      if (code !== 0) return finish(false);
+      try {finish(consumerFree(JSON.parse(Buffer.concat(chunks).toString('utf8'))));} catch {finish(false);}
+    });
+    child.stdin.end();
+  });
+}
+
 function timeout(value: number | undefined, fallback: number): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result <= 0 || result > 2_147_483_647) {

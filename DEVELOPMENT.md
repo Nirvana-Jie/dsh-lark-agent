@@ -59,7 +59,7 @@
 - **宿主在线：** 宿主须保持运行并联网，只关浏览器设置页不影响；不提供远程桌面或远程唤醒。
 - **暂停与恢复：** 「暂停连接」/「恢复连接」可切换；同一宿主重启后自动尝试恢复已启用的连接（限同代际、同 `DSH_HOME` 或插件 `dataDir`，并重查权限、测试模型），失败时设置页显示原因，后台按 5 秒起、最长 10 分钟的间隔自动重试，直到连上或暂停 / 断开；机器人身份变化需要处理，不自动重试。
 - **断开：** 「断开连接」只解除绑定，保留本地资料、CLI profile、记忆和会话。
-- **单一实例：** 同一系统用户下一个机器人只能有一个接收实例，插件无法阻止另一台电脑或另一系统用户再启动一个；换宿主或改用团队部署前先暂停原连接，新宿主需重新连接。
+- **单一实例：** 同一系统用户下一个机器人只能有一个接收实例，插件无法阻止另一台电脑或另一系统用户再启动一个；换宿主或改用团队部署前先暂停原连接，新宿主需重新连接。宿主崩溃、强退或断电后，确认原进程已退出且该机器人没有其他接收进程时，下次启动或自动重试会接管遗留的锁；状态目录须在本机磁盘。
 - **Secret：** 只存于专用 CLI profile（见[扫码接入](#扫码接入)）。
 
 ## 隐私与边界
@@ -275,7 +275,7 @@ dsh --profile feishu-team --dump-config > .runtime/composed.yml
 dsh --profile feishu-team
 ```
 
-须带第 2 步导出的三个环境变量；也可用 `bash scripts/start-bot.sh`（默认上述 `.runtime/` 路径，`DSH_HOME`、`DSH_LARK_CONFIG` 可覆盖）。`[im-larkbot] ready` 只表示事件连接就绪，还须按下表验收。Ctrl+C / SIGTERM 会等待会话保存与关闭，不要强杀。同一 `stateDir` 只能运行一个实例（`instance.lock`，不自动删除）。
+须带第 2 步导出的三个环境变量；也可用 `bash scripts/start-bot.sh`（默认上述 `.runtime/` 路径，`DSH_HOME`、`DSH_LARK_CONFIG` 可覆盖）。`[im-larkbot] ready` 只表示事件连接就绪，还须按下表验收。Ctrl+C / SIGTERM 会等待会话保存与关闭，不要强杀。同一 `stateDir` 只能运行一个实例（`instance.lock`；原进程确认退出后由下次启动回收）。
 
 | 检查 | 预期 |
 | --- | --- |
@@ -287,7 +287,7 @@ dsh --profile feishu-team
 
 **macOS 后台运行：** `scripts/manage-service.sh start`，另有 `status`、`stop`、`restart`。
 
-- 当前登录会话内的 launchd 包装：不写 LaunchAgents，不配置登录自启或崩溃重启，注销或重启后需重新 `start`；`instance.lock` 存在时拒绝启动。
+- 当前登录会话内的 launchd 包装：不写 LaunchAgents，不配置登录自启或崩溃重启，注销或重启后需重新 `start`；锁记录的进程仍在运行时拒绝启动，已退出进程留下的锁由服务启动时核对并回收。
 - 不沿用 shell 中的自定义路径或模型凭据环境变量，模型凭据须存于专用 home；日志在 `.runtime/logs/service.stdout.log` 与 `service.stderr.log`。
 - Linux 用进程管理器运行 `dsh --profile feishu-team`，保留相同环境变量与优雅停止。
 
@@ -336,5 +336,6 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm pack
 | 底部菜单不显示或点击无响应 | 客户端 ≥ 7.22、悬浮样式、版本已发布约 5 分钟（群聊不显示）→ `application.bot.menu_v6` 已订阅、事件标识为 `dsh.new`、`dsh.sessions`、`dsh.model`、`dsh.thinking` → 菜单预检通过 → 扫码接入暂停后恢复，或 `botMenu: true` 后重启见 `menu ready` → 用户 `direct: true` 且先发过一句普通消息 |
 | 「当前对话正由客户端使用」 | App 占用同一原生会话且无法自动续聊（群聊，或宿主缺只读快照续聊接口）→ 在 App 关闭该会话后重试。现代宿主下本人私聊遇明确占用时不提示，改从已保存的只读快照另起续聊：保留话题名和模型选择，重装飞书权限与记忆范围，App 原会话不受影响，之后各自发展 |
 | 无法创建 / 恢复会话 | 模型路由 → JSONL 持久化后端 → `cwd` 与原生日志一致 → 原生日志可读 |
-| 提示另一个实例正在使用 | 暂停同一机器人的 Web / App 或停止后台实例 → 确认原进程和 CLI 子进程均已退出 → 锁不会自动删除，确认失效后才人工处理；保留 `messages.json` |
+| 提示另一个实例正在使用 | 原进程退出后，锁会在下次启动或自动重试时回收（还须 CLI 确认该机器人没有在接收消息的进程）→ 仍提示时暂停同一机器人的 Web / App 或停止后台实例 → `lark-cli --profile <profile> event status --current` 查看是否还有 consumer 或 orphan bus，按提示停止残留进程 → 不要手动删除锁目录；保留 `messages.json` |
+| 设置页提示另一个正在运行的 dsh 正在管理这个飞书连接 | 同一 `DSH_HOME` 或插件 `dataDir` 下还有一个 dsh（如 App 与 Web 同时运行）→ 关闭其中一个，再重启当前 dsh |
 | 发送失败或结果未知 | 查 `[im-larkbot]` 阶段日志 → 按[隐私与边界](#隐私与边界)的「投递」确认上次操作是否生效后再发新消息 |

@@ -6,6 +6,7 @@ import {parseConfig, type BotConfig} from '../config.js';
 import {BotServiceStartError, type BotService} from '../bot-service.js';
 import type {IncomingMessage} from '../message.js';
 import {LarkCli} from '../lark-cli.js';
+import {LockHeldError} from '../lock.js';
 import {BOT_SCOPES, CARD_SCOPE, LarkPlatform, LarkPlatformError, type Inspection} from './lark-platform.js';
 import {ConnectionStore, type ConnectionRecord} from './store.js';
 import {createChallenge, PairingError, waitForPairing} from './pairing.js';
@@ -22,7 +23,11 @@ export interface OnboardingDependencies {
   qr?: (url: string) => Promise<string>;
   acknowledge?: (profile: string, messageId: string, key: string, signal: AbortSignal) => Promise<void>;
   executable?: string;
+  /** Delay before automatic restore attempt `attempt` (0-based) of an enabled connection. */
+  retryDelay?: (attempt: number) => number;
 }
+
+const restoreDelay = (attempt: number) => Math.min(10 * 60_000, 5_000 * 2 ** Math.min(attempt, 10));
 
 const messages = {
   idle: '把助手带到飞书，先用飞书确认创建。',
@@ -34,7 +39,10 @@ const messages = {
   action_required: '请在飞书开发者后台完成设置或等待企业批准，再重新检查。',
 } as const;
 
-export class SetupError extends Error {}
+export class SetupError extends Error {
+  /** False when repeating the same check cannot succeed without the owner acting. */
+  constructor(message: string, readonly retryable = true) {super(message);}
+}
 function errorMessage(error: unknown): string {
   if (error instanceof SetupError) return error.message;
   if (error instanceof PairingError) return {
@@ -42,6 +50,9 @@ function errorMessage(error: unknown): string {
     BUSY: '这个机器人已在另一个实例运行，请先暂停原连接。',
     TRANSPORT: '暂时收不到飞书消息，请确认已启用长连接并发布应用。',
   }[error.code];
+  if (error instanceof LockHeldError) return error.reason === 'consumers'
+    ? '上次的连接已经退出，但 Lark CLI 仍显示这个机器人有进程在接收消息。请先停止该进程；已启用的连接会自动重试。'
+    : '这个机器人正在另一个 dsh 实例中运行。请先在那里暂停连接；原进程退出后，已启用的连接会自动恢复。';
   if (error instanceof LarkPlatformError) {
     if (error.code === 'REGISTRATION_EXPIRED') return '二维码已过期，请返回并重新扫码。';
     if (error.code === 'PROFILE_EXISTS') return '连接名称已被使用，请重新创建连接。';
@@ -76,6 +87,8 @@ export class ConnectionController {
   private documentAborter?: AbortController;
   private candidate?: {id: string; message: IncomingMessage; expiresAt: number};
   private commands: Promise<unknown> = Promise.resolve();
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private retryAttempts = 0;
   constructor(private readonly deps: OnboardingDependencies) {}
 
   snapshot(): ConnectionSnapshot {return structuredClone({...this.state,
@@ -96,14 +109,43 @@ export class ConnectionController {
   private assertCurrent(signal: AbortSignal): void {signal.throwIfAborted(); if (this.closed) throw new SetupError('连接设置已关闭。');}
   private async save(record: ConnectionRecord): Promise<void> {await this.deps.store.write(record); this.record = record;}
   private launch(work: (signal: AbortSignal) => Promise<void>): void {
+    this.clearRetry();
     const generation = ++this.generation;
     const aborter = this.aborter = new AbortController();
+    let retryable = true;
     this.job = Promise.resolve().then(() => work(aborter.signal)).catch(error => {
       if (generation !== this.generation || this.closed || aborter.signal.aborted) return;
+      retryable = !(error instanceof SetupError) || error.retryable;
       this.phase('error', errorMessage(error));
       if (this.record) this.state.action = {label: '检查飞书设置', url: this.consoleUrl()};
-    }).finally(() => {if (generation === this.generation) {this.job = undefined; this.aborter = undefined;}});
+    }).finally(() => {
+      if (generation !== this.generation) return;
+      this.job = undefined; this.aborter = undefined;
+      if (retryable && !aborter.signal.aborted) this.scheduleRetry(generation);
+    });
   }
+  /**
+   * An enabled, verified connection keeps trying while the host runs, so an
+   * offline login, a provider blip or a slow old instance needs nobody at the
+   * computer. Only read-only checks repeat; pairing and writes never do.
+   */
+  private scheduleRetry(generation: number): void {
+    if (this.closed || this.service || this.unsafeStop || !this.record?.enabled || !this.record.verified) return;
+    const delay = (this.deps.retryDelay ?? restoreDelay)(this.retryAttempts++);
+    this.state = {...this.state, message: `${this.state.message} 后台会自动重试。`};
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      const attempt = this.commands.then(() => {
+        if (this.closed || this.job || this.service || this.unsafeStop || generation !== this.generation
+          || !this.record?.enabled || !this.record.verified) return;
+        this.phase('configuring', '正在自动重新连接飞书。');
+        this.launch(signal => this.check(signal, false));
+      });
+      this.commands = attempt.catch(() => undefined);
+    }, delay);
+    this.retryTimer.unref?.();
+  }
+  private clearRetry(): void {clearTimeout(this.retryTimer); this.retryTimer = undefined;}
   async initialize(): Promise<void> {
     this.record = await this.deps.store.read(); // Corrupt durable state fails closed.
     if (!this.record) return;
@@ -219,6 +261,7 @@ export class ConnectionController {
           return this.snapshot();
         }
         this.deps.checkRuntime();
+        this.retryAttempts = 0;
         this.phase('configuring'); this.launch(signal => this.check(signal, false));
       } else throw new SetupError('不支持的连接操作。');
       return this.snapshot();
@@ -260,7 +303,7 @@ export class ConnectionController {
     this.documentsReady = inspection.scopeStatus === 'verified' && documentScopesReady(inspection.grantedScopes);
     this.assertCurrent(signal);
     if (inspection.appId !== record.appId || (record.botOpenId && inspection.botOpenId && record.botOpenId !== inspection.botOpenId)) {
-      throw new SetupError('机器人身份发生变化，请断开后重新绑定。');
+      throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
     }
     record = {...record, botOpenId: inspection.botOpenId ?? record.botOpenId,
       creatorOpenId: record.creatorOpenId ?? inspection.creatorOpenId};
@@ -291,7 +334,7 @@ export class ConnectionController {
         inspection = await this.deps.platform.inspect(record.profile, signal);
         this.assertCurrent(signal);
         if (inspection.appId !== record.appId || (record.botOpenId && inspection.botOpenId && record.botOpenId !== inspection.botOpenId)) {
-          throw new SetupError('机器人身份发生变化，请断开后重新绑定。');
+          throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
         }
         await this.save({...this.record!, botOpenId: inspection.botOpenId ?? this.record!.botOpenId,
           creatorOpenId: this.record!.creatorOpenId ?? inspection.creatorOpenId});
@@ -300,7 +343,10 @@ export class ConnectionController {
     if (inspection.appStatus === 0 || inspection.appStatus === 2) {
       this.action('飞书应用尚未启用，请在后台启用并完成发布后重新检查。'); return;
     }
-    if (inspection.scopeStatus !== 'verified' || required.some(scope => !inspection.grantedScopes.includes(scope))) {
+    if (inspection.scopeStatus !== 'verified') {
+      this.action('暂时无法读取飞书应用权限，请确认网络和 Lark CLI 可用后重新检查。'); return;
+    }
+    if (required.some(scope => !inspection.grantedScopes.includes(scope))) {
       this.action('机器人所需的消息权限尚未生效。请在飞书确认权限并发布应用后重新检查。'); return;
     }
     if (['pending', 'draft', 'rejected'].includes(inspection.publicationStatus)) {
@@ -323,7 +369,7 @@ export class ConnectionController {
 
   private async config(): Promise<BotConfig> {
     const record = this.record!;
-    if (!record.ownerOpenId || !record.botOpenId) throw new SetupError('请先确认你的飞书身份。');
+    if (!record.ownerOpenId || !record.botOpenId) throw new SetupError('请先确认你的飞书身份。', false);
     const identity = createHash('sha256').update(JSON.stringify([record.appId, record.ownerOpenId])).digest('hex').slice(0, 24);
     const directory = join(this.deps.store.directory, 'bots', identity);
     const cwd = join(directory, 'workspace');
@@ -377,6 +423,7 @@ export class ConnectionController {
     }
     ownedService = service;
     this.service = service;
+    this.retryAttempts = 0;
     try {
       this.assertCurrent(signal);
       if (activate) {await this.save({...this.record!, enabled: true}); this.phase(service.ready() ? 'connected' : 'starting');}
@@ -387,6 +434,7 @@ export class ConnectionController {
     }
   }
   private async cancel(): Promise<void> {
+    this.clearRetry();
     await this.cancelDocuments();
     this.generation++; this.aborter?.abort();
     await this.job; this.job = undefined; this.aborter = undefined; this.candidate = undefined;

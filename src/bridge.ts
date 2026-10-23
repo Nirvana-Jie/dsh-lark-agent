@@ -13,7 +13,7 @@ import {ModelPreferencesError, type ModelPreferencesStore, type ModelPreferenceR
 import {modelChoice, thinkingChoice, modelControlPanel, modelStateText, sameSelection, isModelQuestion} from './model-controls.js';
 import {botMenuCommand, BOT_MENU_EVENT} from './bot-menu.js';
 import {CommandFeedback} from './command-feedback.js';
-import {PresentationError, presentationDraft, presentationCard, presentationText} from './presentation.js';
+import {PresentationError, presentationDraft, presentationCard, presentationText, type PresentationDraft} from './presentation.js';
 import type {ArtifactStore, ArtifactContext, SavedArtifact} from './artifacts.js';
 import type {ArtifactPublisher} from './artifact-publisher.js';
 
@@ -364,17 +364,12 @@ export class BotBridge {
         return;
       }
       const answer = typeof result === 'string' ? result : result.text;
-      const drafts = typeof result === 'string' ? [] : result.artifacts.map(presentationDraft);
-      if (drafts.length > 2) throw new PresentationError();
+      const artifacts = typeof result === 'string' ? [] : result.artifacts;
       const bounded = Array.from(answer).slice(0, this.config.maxOutputChars).join('');
-      const savedArtifacts: SavedArtifact[] = [];
-      for (const [index, draft] of drafts.entries()) {
-        if (controller.signal.aborted || this.stopped) break;
-        if (this.state.artifacts && lane.saved) savedArtifacts.push(await this.state.artifacts.add(this.artifactContext(message, lane.saved.id), `${message.requestId ?? message.messageId}:${index}`, draft));
-      }
-      if (bounded || !drafts.length) await this.reply(message, bounded ? bounded + (bounded.length < answer.length ? '\n\n（回复已截断）' : '') : 'dsh 本次没有返回文本。', controller.signal);
-      if (savedArtifacts.length) for (const saved of savedArtifacts) await this.deliverArtifact(message, saved, true, controller.signal);
-      else for (const draft of drafts) await this.reply(message, presentationText(draft), controller.signal);
+      // The answer is already in native history. Send it before artifact work
+      // that can fail, so a storage limit cannot swallow a complete reply.
+      if (bounded || !artifacts.length) await this.reply(message, bounded ? bounded + (bounded.length < answer.length ? '\n\n（回复已截断）' : '') : 'dsh 本次没有返回文本。', controller.signal);
+      await this.presentArtifacts(message, lane, artifacts, controller.signal);
       this.audit({stage: 'replied', messageId: message.messageId});
     } catch (error) {
       clearTimeout(timer);
@@ -719,6 +714,33 @@ export class BotBridge {
 
   private artifactContext(message: RoutedMessage, sessionId: string): ArtifactContext {
     return {...this.sessionContext(message), sessionId};
+  }
+
+  /** Save, then show, a turn's artifacts. An artifact that cannot be saved is shown as text with the reason. */
+  private async presentArtifacts(message: RoutedMessage, lane: Lane, values: readonly unknown[], signal: AbortSignal): Promise<void> {
+    if (!values.length || signal.aborted || this.stopped) return;
+    let drafts: PresentationDraft[];
+    try {
+      if (values.length > 2) throw new PresentationError();
+      drafts = values.map(value => presentationDraft(value));
+    } catch (error) {
+      return this.reply(message, error instanceof PresentationError ? error.message : new PresentationError().message, signal);
+    }
+    const entries: Array<{draft: PresentationDraft; saved?: SavedArtifact; note?: string}> = [];
+    for (const [index, draft] of drafts.entries()) {
+      if (signal.aborted || this.stopped) return;
+      if (!this.state.artifacts || !lane.saved) {entries.push({draft}); continue;}
+      try {
+        entries.push({draft, saved: await this.state.artifacts.add(this.artifactContext(message, lane.saved.id), `${message.requestId ?? message.messageId}:${index}`, draft)});
+      } catch (error) {
+        this.audit({stage: 'artifact-save-failed', messageId: message.messageId});
+        entries.push({draft, note: error instanceof PresentationError ? error.message : '作品暂时无法保存。'});
+      }
+    }
+    for (const {draft, saved, note} of entries) {
+      if (saved) await this.deliverArtifact(message, saved, true, signal);
+      else await this.reply(message, presentationText(draft) + (note ? `\n\n（未能保存为作品：${note}）` : ''), signal);
+    }
   }
 
   private async deliverArtifact(message: RoutedMessage, initial: SavedArtifact, publish: boolean, caller?: AbortSignal): Promise<void> {

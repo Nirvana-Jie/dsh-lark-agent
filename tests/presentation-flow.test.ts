@@ -65,6 +65,21 @@ describe('rich result lifecycle', () => {
     const restored = await fixture(chart, f.dir); await restored.bridge.accept(message('/results'));
     expect(JSON.stringify(restored.payloads)).toContain('"tag":"chart"'); expect(restored.run).not.toHaveBeenCalled();
   });
+  it('sends the answer before its artifact and keeps both when the artifact cannot be saved', async () => {
+    const f = await fixture();
+    f.run.mockResolvedValue({text: '这是正文结论。', artifacts: [chart]});
+    await f.bridge.accept(message('画图并说明'));
+    expect(f.payloads.map(payload => payload.kind)).toEqual(['text', 'card']);
+    expect(f.payloads[0]).toEqual({kind: 'text', text: '这是正文结论。'});
+    f.payloads.length = 0;
+    vi.spyOn(f.state.artifacts, 'add').mockRejectedValueOnce(new PresentationError('你的作品数量已达到上限，已有作品会保留。'));
+    await f.bridge.accept(message('再画一张'));
+    expect(f.payloads).toHaveLength(2);
+    expect(f.payloads[0]).toEqual({kind: 'text', text: '这是正文结论。'});
+    const fallback = f.payloads[1]!.kind === 'text' ? f.payloads[1]!.text : '';
+    expect(fallback).toContain('示例数据'); expect(fallback).toContain('A：计数 3');
+    expect(fallback).toContain('未能保存为作品：你的作品数量已达到上限');
+  });
   it('resumes an owner-bound form as data and prevents a second submission', async () => {
     const f = await fixture(form); await f.bridge.accept(message('让我选择一下'));
     const token = tokens(f.payloads[0]!)[0]!; expect(token).toBeTruthy();

@@ -37,8 +37,9 @@ export function parseMessage(raw: unknown, botOpenId: string): IncomingMessage |
     }
   }
   if (!text) return;
-  const threadId = typeof data.thread_id === 'string' && /^(om|omt)_[a-zA-Z0-9_-]+$/.test(data.thread_id)
-    ? data.thread_id : validId(data.root_id, 'om') ? data.root_id : '';
+  // Only a real Lark thread is its own conversation. A quote reply also carries
+  // root_id, but it continues the chat's current conversation.
+  const threadId = typeof data.thread_id === 'string' && /^(om|omt)_[a-zA-Z0-9_-]+$/.test(data.thread_id) ? data.thread_id : '';
   return {messageId: data.message_id, chatId: data.chat_id, senderId: data.sender_id, chatType: data.chat_type, threadId, text};
 }
 export function authorize(message: IncomingMessage, config: BotConfig): UserPolicy | undefined {

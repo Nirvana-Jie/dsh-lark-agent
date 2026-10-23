@@ -14,7 +14,7 @@ const registered: RegisteredApp = {appId: 'cli_test', appSecret: 'fixture-secret
 const ok = (data: unknown) => JSON.stringify({ok: true, identity: 'bot', data});
 
 function platformFixture(options: {
-  missingScope?: string; applicationError?: boolean; pending?: boolean; rawApi?: boolean; botError?: boolean;
+  missingScope?: string; applicationError?: boolean; pending?: boolean; firstPublication?: boolean; rawApi?: boolean; botError?: boolean;
   cardDecision?: unknown; cardError?: boolean; menuDecision?: unknown; menuError?: boolean;
 } = {}) {
   const run = vi.fn<PlatformRunner>(async args => {
@@ -43,12 +43,14 @@ function platformFixture(options: {
     if (path === '/open-apis/application/v6/applications/cli_test') {
       if (options.applicationError) throw new LarkPlatformError('MISSING_SCOPE');
       return ok({app: {app_id: 'cli_test', status: 1, creator_id: 'ou_previous_owner',
-        owner: {type: 2, owner_id: 'ou_creator'}, online_version_id: 'oav_online',
+        owner: {type: 2, owner_id: 'ou_creator'}, online_version_id: options.firstPublication ? '' : 'oav_online',
         unaudit_version_id: options.pending ? 'oav_pending' : '', redirect_urls: ['private-info']}});
     }
-    if (path?.includes('/app_versions/')) return ok({app_version: {app_id: 'cli_test',
-      version_id: options.pending ? 'oav_pending' : 'oav_online', status: options.pending ? 3 : 1,
-      events: ['im.message.receive_v1']}});
+    if (path?.includes('/app_versions/')) {
+      const version = path.slice(path.lastIndexOf('/') + 1);
+      return ok({app_version: {app_id: 'cli_test', version_id: version, status: version === 'oav_pending' ? 3 : 1,
+        events: ['im.message.receive_v1']}});
+    }
     if (args[3] === 'PATCH') return ok({});
     if (args[3] === 'POST') return ok({version_id: '1000000000000000001'});
     throw new Error('unexpected fake command');
@@ -403,6 +405,20 @@ describe('Lark onboarding platform inspection and publication', () => {
     const {platform, run} = platformFixture({pending: true});
     await expect(platform.configureAndPublish(profile.name, 'cli_test')).rejects.toMatchObject({code: 'APP_IN_REVIEW'});
     expect(run.mock.calls.some(([args]) => args[3] === 'PATCH')).toBe(false);
+  });
+
+  it('keeps an approved online version usable while a later version awaits review', async () => {
+    const {platform, run} = platformFixture({pending: true});
+    expect(await platform.inspect(profile.name)).toMatchObject({onlineVersionId: 'oav_online', pendingVersionId: 'oav_pending', publicationStatus: 'approved'});
+    expect(run.mock.calls.map(([args]) => args[4]).filter(path => path?.includes('/app_versions/')))
+      .toEqual(['/open-apis/application/v6/applications/cli_test/app_versions/oav_online']);
+  });
+
+  it('judges a first publication with nothing online by its pending version', async () => {
+    const {platform} = platformFixture({pending: true, firstPublication: true});
+    const result = await platform.inspect(profile.name);
+    expect(result).toMatchObject({pendingVersionId: 'oav_pending', publicationStatus: 'pending'});
+    expect(result.onlineVersionId).toBeUndefined();
   });
 
   it('rejects profile and application identity mismatches before writing', async () => {

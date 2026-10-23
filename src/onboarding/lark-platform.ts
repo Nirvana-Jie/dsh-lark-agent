@@ -367,7 +367,9 @@ export class LarkPlatform {
         }
       }),
     ]);
-    const version = inspection.pendingVersionId ?? inspection.onlineVersionId;
+    // An approved online version keeps serving while a later version awaits review.
+    // Only a first publication, with nothing online yet, is judged by its pending version.
+    const version = inspection.onlineVersionId ?? inspection.pendingVersionId;
     if (version) await probe('version', async () => {
       const result = await this.api(profile, 'GET', `/open-apis/application/v6/applications/${selected.appId}/app_versions/${version}`,
         signal, undefined, {lang: 'zh_cn', user_id_type: 'open_id'});

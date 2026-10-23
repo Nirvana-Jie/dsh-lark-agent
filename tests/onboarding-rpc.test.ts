@@ -1,5 +1,10 @@
+import {mkdtemp, readdir, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import type {Context} from '@deepseek-ai/cordis';
 import {describe, expect, it, vi} from 'vitest';
-import {registerConnectionRpc} from '../src/onboarding/host.js';
+import {acquireLock} from '../src/lock.js';
+import {applyOnboarding, registerConnectionRpc} from '../src/onboarding/host.js';
 import {ConnectionController, SetupError, officialDestination} from '../src/onboarding/controller.js';
 import type {ConnectionResult} from '../src/onboarding/protocol.js';
 
@@ -95,4 +100,36 @@ describe('official registration destinations', () => {
     'https://user:password@open.feishu.cn/x', 'javascript:alert(1)', 'https://open.feishu.cn:9999/x'])('rejects unsafe destination %s', url => {
       expect(() => officialDestination(url)).toThrow();
     });
+});
+
+describe('connection settings owned by another running host', () => {
+  it('stays readable and inert instead of starting a second controller', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dsh-onboarding-host-'));
+    // This live process holds the controller lock, exactly as another running host would.
+    const held = await acquireLock(join(dataDir, 'controller'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      let handler!: Handler;
+      const remove = vi.fn(async () => undefined), effects: Array<() => () => Promise<void>> = [];
+      const ctx = {
+        get: (name: string) => name === 'connection' ? {rpc: {handle(_channel: string, callback: Handler) {handler = callback; return remove;}}} : undefined,
+        effect: (factory: () => () => Promise<void>) => {effects.push(factory);},
+      };
+      await applyOnboarding(ctx as unknown as Context, {dataDir});
+      const signal = new AbortController().signal;
+      expect(await handler('status', {}, signal, owner)).toMatchObject({ok: true,
+        value: {phase: 'error', busy: false, message: expect.stringContaining('另一个正在运行的 dsh 正在管理这个飞书连接')}});
+      for (const endpoint of ['resume', 'create', 'profiles']) {
+        expect(await handler(endpoint, {}, signal, owner)).toMatchObject({ok: false, error: {message: expect.stringContaining('请先关闭那个 dsh')}});
+      }
+      expect(await handler('status', {}, signal, {principal: {kind: 'guest'}})).toMatchObject({ok: false});
+      expect(await readdir(dataDir)).toEqual(['controller']);
+      await effects[0]!()();
+      expect(remove).toHaveBeenCalledOnce();
+    } finally {
+      error.mockRestore();
+      await held();
+      await rm(dataDir, {recursive: true, force: true});
+    }
+  });
 });

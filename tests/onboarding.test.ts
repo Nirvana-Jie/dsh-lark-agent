@@ -1,4 +1,6 @@
-import {mkdtemp, readFile, writeFile, stat, readdir, rm} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
+import {mkdir, mkdtemp, readFile, writeFile, stat, readdir, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
@@ -6,7 +8,8 @@ import {ConnectionController, type OnboardingDependencies} from '../src/onboardi
 import {ConnectionStore, connectionRecord, type ConnectionRecord} from '../src/onboarding/store.js';
 import {createChallenge, matchesPairing, waitForPairing, type PairingTransport} from '../src/onboarding/pairing.js';
 import {BOT_SCOPES, SETUP_SCOPES, CARD_SCOPE, LarkPlatformError, type Inspection, type RegisteredApp} from '../src/onboarding/lark-platform.js';
-import {BotServiceStartError, type BotService} from '../src/bot-service.js';
+import {botLeaseDirectory, BotServiceStartError, type BotService} from '../src/bot-service.js';
+import {LockHeldError} from '../src/lock.js';
 import type {IncomingMessage} from '../src/message.js';
 import type {ConnectionEndpoint, ConnectionPhase} from '../src/onboarding/protocol.js';
 import {DOCUMENT_SCOPES} from '../src/rich-scopes.js';
@@ -367,11 +370,15 @@ describe('connection controller lifecycle', () => {
 
   it('does not become ready after model preflight fails, including on a subsequent retry', async () => {
     const h = await fixture();
+    h.deps.retryDelay = () => 5;
     vi.mocked(h.deps.preflight).mockRejectedValue(new Error('private-model-token'));
     await h.controller.command('use-profile', {name: 'test-bot'});
     await phase(h.controller, 'error');
     expect(h.controller.snapshot().message).not.toContain('private-model-token');
     expect(h.deps.start).not.toHaveBeenCalled();
+    // An unverified setup never retries on its own; only the owner's click repeats it.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.deps.preflight).toHaveBeenCalledOnce();
     await h.controller.command('recheck', {});
     await vi.waitFor(() => expect(h.deps.preflight).toHaveBeenCalledTimes(2));
     await phase(h.controller, 'error');
@@ -473,6 +480,60 @@ describe('connection controller lifecycle', () => {
     expect(vi.mocked(h.deps.start).mock.calls[0]![3]).toEqual({openId: 'ou_owner', chatId: 'oc_owner'});
   });
 
+  it('keeps retrying a failed automatic restore until it connects, without a click or pairing', async () => {
+    const h = await fixture(baseRecord);
+    h.deps.retryDelay = () => 5;
+    // Offline CLI at login, then unreadable grants, then a model blip during preflight.
+    h.platform.inspect.mockRejectedValueOnce(new LarkPlatformError('COMMAND_FAILED'))
+      .mockResolvedValueOnce(inspection({scopeStatus: 'unavailable', grantedScopes: [], problems: [{operation: 'scopes', code: 'COMMAND_FAILED'}]}));
+    vi.mocked(h.deps.preflight).mockRejectedValueOnce(new Error('provider blip'));
+    const phases = new Set<string>();
+    const watch = setInterval(() => phases.add(h.controller.snapshot().phase), 1);
+    try {
+      await h.controller.initialize();
+      await phase(h.controller, 'connected');
+    } finally {clearInterval(watch);}
+    expect(h.platform.inspect).toHaveBeenCalledTimes(4);
+    expect(h.deps.preflight).toHaveBeenCalledTimes(2);
+    expect(h.deps.start).toHaveBeenCalledOnce();
+    expect(h.deps.pair).not.toHaveBeenCalled();
+    expect(phases).toContain('error'); expect(phases).toContain('action_required');
+    expect(await h.store.read()).toMatchObject({enabled: true, verified: true});
+  });
+
+  it('explains a bot held by another process and connects on its own once the lock frees', async () => {
+    const h = await fixture(baseRecord);
+    h.deps.retryDelay = () => 30;
+    vi.mocked(h.deps.start).mockRejectedValueOnce(new LockHeldError('consumers', 4242)).mockRejectedValueOnce(new LockHeldError('running', 4242));
+    const seen = new Set<string>();
+    const watch = setInterval(() => seen.add(h.controller.snapshot().message), 1);
+    try {
+      await h.controller.initialize();
+      await phase(h.controller, 'connected');
+    } finally {clearInterval(watch);}
+    expect([...seen].some(message => message.includes('Lark CLI 仍显示这个机器人有进程在接收消息') && message.includes('后台会自动重试'))).toBe(true);
+    expect([...seen].some(message => message.includes('这个机器人正在另一个 dsh 实例中运行'))).toBe(true);
+    expect(h.deps.start).toHaveBeenCalledTimes(3);
+  });
+
+  it('explains a retrying restore and stops retrying once the owner pauses', async () => {
+    const h = await fixture(baseRecord);
+    h.deps.retryDelay = () => 20;
+    h.platform.inspect.mockResolvedValue(inspection({scopeStatus: 'unavailable', grantedScopes: [], problems: [{operation: 'scopes', code: 'TIMEOUT'}]}));
+    await h.controller.initialize();
+    await phase(h.controller, 'action_required');
+    expect(h.controller.snapshot().message).toContain('暂时无法读取飞书应用权限');
+    expect(h.controller.snapshot().message).toContain('后台会自动重试');
+    await vi.waitFor(() => expect(h.platform.inspect.mock.calls.length).toBeGreaterThan(1), {timeout: 1500, interval: 5});
+    await h.controller.command('pause', {});
+    const attempts = h.platform.inspect.mock.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    expect(h.platform.inspect).toHaveBeenCalledTimes(attempts);
+    expect(h.controller.snapshot().phase).toBe('paused');
+    expect(h.deps.start).not.toHaveBeenCalled();
+    expect((await h.store.read())?.enabled).toBe(false);
+  });
+
   it('refreshes default capabilities after a paused restart without starting or authorizing anything', async () => {
     const h = await fixture({...baseRecord, enabled: false});
     h.platform.inspect.mockResolvedValue(inspection({grantedScopes: [...BOT_SCOPES, ...DOCUMENT_SCOPES]}));
@@ -501,11 +562,15 @@ describe('connection controller lifecycle', () => {
     expect(h.controller.snapshot().phase).toBe('starting');
   });
 
-  it('rejects changed application identity during restart before starting a receiver', async () => {
+  it('rejects changed application identity during restart before starting a receiver, without retrying', async () => {
     const h = await fixture(baseRecord);
+    h.deps.retryDelay = () => 5;
     h.platform.inspect.mockResolvedValue(inspection({appId: 'cli_changed'}));
     await h.controller.initialize();
     await phase(h.controller, 'error');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.platform.inspect).toHaveBeenCalledOnce();
+    expect(h.controller.snapshot().message).not.toContain('自动重试');
     expect(h.deps.start).not.toHaveBeenCalled();
   });
 
@@ -645,5 +710,47 @@ describe('pairing identity and receiver lease', () => {
     const h = transportFixture(); h.lease.mockRejectedValue(new Error('held'));
     await expect(h.begin()).rejects.toMatchObject({code: 'BUSY'});
     expect(h.transport.start).not.toHaveBeenCalled(); expect(h.release).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === 'win32')('recovers a lease left by an exited process only when the bot CLI reports no consumers', async () => {
+    const home = await directory(), previous = process.env.HOME;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    process.env.HOME = home;
+    try {
+      const lease = join(botLeaseDirectory('ou_bot'), 'instance.lock'), exited = spawnSync(process.execPath, ['-e', '']).pid!;
+      const plant = async () => {
+        await mkdir(lease, {recursive: true});
+        await writeFile(join(lease, 'owner.json'), JSON.stringify({version: 1, pid: exited, identity: null, createdAt: Date.now(), token: randomUUID()}));
+      };
+      const cli = async (status: unknown) => {
+        const path = join(home, `lark-cli-${randomUUID()}`);
+        await writeFile(path, `#!/bin/sh\nprintf '%s' '${JSON.stringify(status)}'\n`, {mode: 0o700});
+        return path;
+      };
+      const pair = (executable: string) => {
+        let deliver!: (raw: unknown) => void;
+        const transport = {start: vi.fn(async (onEvent: (raw: unknown) => void) => {deliver = onEvent;}), stop: vi.fn(async () => undefined)};
+        const pending = waitForPairing({profile: 'test-bot', botOpenId: 'ou_bot', challenge: {code: 'DSH-fixture', expiresAt: Date.now() + 60_000},
+          expectedOwner: 'ou_owner', signal: new AbortController().signal, transport, executable});
+        return {transport, pending, send: () => deliver(raw())};
+      };
+
+      await plant();
+      const busy = pair(await cli({apps: [{app_id: 'cli_fixture', status: 'running', running: true, active_consumers: 1, consumers: [{pid: 7}]}]}));
+      await expect(busy.pending).rejects.toMatchObject({code: 'BUSY'});
+      expect(busy.transport.start).not.toHaveBeenCalled();
+      expect(JSON.parse(await readFile(join(lease, 'owner.json'), 'utf8')).pid).toBe(exited);
+
+      const free = pair(await cli({apps: [{app_id: 'cli_fixture', status: 'not_running', running: false}]}));
+      await vi.waitFor(() => expect(free.transport.start).toHaveBeenCalledOnce());
+      expect(JSON.parse(await readFile(join(lease, 'owner.json'), 'utf8')).pid).toBe(process.pid);
+      free.send();
+      expect((await free.pending).messageId).toBe('om_pair');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`exited process ${exited}`));
+      await expect(stat(lease)).rejects.toMatchObject({code: 'ENOENT'});
+    } finally {
+      process.env.HOME = previous;
+      warn.mockRestore();
+    }
   });
 });

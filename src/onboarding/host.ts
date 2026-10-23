@@ -6,7 +6,7 @@ import {homedir} from 'node:os';
 import {delimiter, join, resolve} from 'node:path';
 import {createBotService, BotServiceStartError, type BotService} from '../bot-service.js';
 import {checkRuntimeCompatibility, DshRuntime} from '../dsh-runtime.js';
-import {acquireLock} from '../lock.js';
+import {acquireLock, LockHeldError} from '../lock.js';
 import {ConnectionController, SetupError} from './controller.js';
 import {ConnectionStore} from './store.js';
 import {LarkPlatform} from './lark-platform.js';
@@ -25,11 +25,22 @@ const endpoints = new Set<ConnectionEndpoint>(['status', 'profiles', 'create', '
   'renew-pairing', 'confirm-owner', 'pause', 'resume', 'disconnect', 'enable-documents', 'cancel-documents']);
 const failure = (message: string): ConnectionResult<never> => ({ok: false, error: {code: 'internal', message, details: {}}});
 class ConnectionRegistrationCleanupError extends Error {}
+type ConnectionControl = Pick<ConnectionController, 'snapshot' | 'profiles' | 'command'>;
+
+/** Settings stay readable, but inert, while another running host owns this connection directory. */
+export function lockedConnectionControl(): ConnectionControl {
+  const message = '另一个正在运行的 dsh 正在管理这个飞书连接（同一 DSH_HOME 或插件数据目录）。请先关闭那个 dsh，再重启当前 dsh。';
+  return {
+    snapshot: () => ({phase: 'error', message, busy: false, capabilities: {cards: false, loading: false}}),
+    profiles: async () => {throw new SetupError(message);},
+    command: async () => {throw new SetupError(message);},
+  };
+}
 
 /** Legacy channels pin loopback; modern exact routes inherit the host's authenticated owner gate. */
-export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionController): () => Promise<void>;
-export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionController, ownerRoutes?: OwnerFetchRoutes): (() => Promise<void>) | Promise<() => Promise<void>>;
-export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionController, ownerRoutes?: OwnerFetchRoutes): (() => Promise<void>) | Promise<() => Promise<void>> {
+export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionControl): () => Promise<void>;
+export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionControl, ownerRoutes?: OwnerFetchRoutes): (() => Promise<void>) | Promise<() => Promise<void>>;
+export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionControl, ownerRoutes?: OwnerFetchRoutes): (() => Promise<void>) | Promise<() => Promise<void>> {
   const legacy = rpc.handle.length === 3;
   if (!legacy && rpc.handle.length !== 2) throw new SetupError('此 dsh 版本的连接接口尚未验证，请更新到支持的版本。');
   const dispatch = async (endpoint: string, payload: unknown, signal: AbortSignal): Promise<ConnectionResult<unknown>> => {
@@ -123,7 +134,7 @@ export async function findLarkExecutable(explicit?: string): Promise<string> {
 }
 
 function requireRuntime(ctx: Context): void {
-  if (!checkRuntimeCompatibility(ctx).supported) throw new SetupError('当前 dsh 缺少所需的会话能力，请检查插件和持久化服务。');
+  if (!checkRuntimeCompatibility(ctx).supported) throw new SetupError('当前 dsh 缺少所需的会话能力，请检查插件和持久化服务。', false);
   const selection = (ctx.get('agentDefaultModel') as {currentSelection?(): {provider?: string; model?: string}} | undefined)?.currentSelection?.();
   if (!selection?.provider || !selection.model) throw new SetupError('请先在 dsh 的模型设置中选择可用模型，然后回来继续连接飞书。');
 }
@@ -150,7 +161,15 @@ export async function applyOnboarding(ctx: Context, options: {dataDir?: string; 
   const homeKey = createHash('sha256').update(resolve(process.env.DSH_HOME ?? homedir())).digest('hex').slice(0, 16);
   // Never mix legacy and V4 native logs or silently migrate a former headless installation.
   const directory = options.dataDir ? resolve(options.dataDir) : join(homedir(), '.dsh-larkbot', 'hosts', family, homeKey);
-  const release = await acquireLock(join(directory, 'controller'));
+  let release: () => Promise<void>;
+  try {release = await acquireLock(join(directory, 'controller'));} catch (error) {
+    if (!(error instanceof LockHeldError)) throw error;
+    // A live host owns this directory: explain it in settings instead of failing to load.
+    console.error('[im-larkbot] another running dsh host owns these Lark connection settings; not starting a second controller.');
+    const remove = await registerConnectionRpc(connection.rpc, lockedConnectionControl(), connection.fetch);
+    ctx.effect(() => async () => {await remove();}, 'im-larkbot.connection-settings');
+    return;
+  }
   const executable = await findLarkExecutable(options.executable);
   const controller = new ConnectionController({store: new ConnectionStore(directory), platform: new LarkPlatform({executable}), executable,
     checkRuntime: () => requireRuntime(ctx),

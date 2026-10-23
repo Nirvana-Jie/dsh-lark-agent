@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
-import { LarkCli } from '../src/lark-cli.js';
+import { consumerFree, LarkCli, noActiveConsumers } from '../src/lark-cli.js';
 
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
@@ -693,5 +693,50 @@ describe('LarkCli subprocess transport', () => {
     await stopped;
     expect(child.kill.mock.calls.every(([signal]) => signal === 'SIGTERM')).toBe(true);
     child.close();
+  });
+});
+
+describe('event consumer check before a bot lease takeover', () => {
+  let child: FakeChild;
+  beforeEach(() => {
+    child = new FakeChild();
+    vi.mocked(spawn).mockReset().mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+  });
+
+  it('accepts only a stopped bus, or a running one without consumers, for exactly one app', () => {
+    // Shapes from larksuite/cli cmd/event/status.go (`event status --current --json`).
+    expect(consumerFree({apps: [{app_id: 'cli_fixture', status: 'not_running', running: false}]})).toBe(true);
+    expect(consumerFree({apps: [{app_id: 'cli_fixture', status: 'running', running: true, pid: 9, uptime_sec: 5}]})).toBe(true);
+    expect(consumerFree({apps: [{app_id: 'cli_fixture', status: 'running', running: true, active_consumers: 1,
+      consumers: [{pid: 7, event_key: 'im.message.receive_v1'}]}]})).toBe(false);
+    expect(consumerFree({apps: [{app_id: 'cli_fixture', status: 'running', running: true, consumers: [{pid: 7}]}]})).toBe(false);
+    // An orphan bus lost its socket, so its consumers cannot be queried.
+    expect(consumerFree({apps: [{app_id: 'cli_fixture', status: 'orphan', running: false, pid: 9}]})).toBe(false);
+    for (const value of [null, [], {}, {apps: []}, {apps: [{status: 'not_running'}, {status: 'not_running'}]},
+      {apps: [{status: 'starting'}]}, {apps: [{status: 'running', active_consumers: '0'}]}, {apps: [{status: 'running', consumers: {}}]}]) {
+      expect(consumerFree(value)).toBe(false);
+    }
+  });
+
+  it('asks the bot profile read-only and treats any failure or timeout as an active consumer', async () => {
+    const free = noActiveConsumers({profile: 'team-bot', executable: '/opt/lark-cli'});
+    child.stdout.write(JSON.stringify({apps: [{app_id: 'cli_fixture', status: 'not_running', running: false}]}));
+    child.close();
+    expect(await free).toBe(true);
+    expect(spawn).toHaveBeenCalledWith('/opt/lark-cli', ['--profile', 'team-bot', 'event', 'status', '--current', '--json'],
+      expect.objectContaining({shell: false}));
+    expect(child.stdin.writableEnded).toBe(true);
+    for (const finish of [(next: FakeChild) => next.close(1), (next: FakeChild) => {next.stdout.write('not json'); next.close();},
+      (next: FakeChild) => next.emit('error', new Error('spawn ENOENT'))]) {
+      const next = new FakeChild();
+      vi.mocked(spawn).mockReturnValueOnce(next as unknown as ReturnType<typeof spawn>);
+      const pending = noActiveConsumers({profile: 'team-bot'});
+      finish(next);
+      expect(await pending).toBe(false);
+    }
+    const slow = new FakeChild();
+    vi.mocked(spawn).mockReturnValueOnce(slow as unknown as ReturnType<typeof spawn>);
+    expect(await noActiveConsumers({profile: 'team-bot', timeoutMs: 10})).toBe(false);
+    expect(slow.kill).toHaveBeenCalledWith('SIGTERM');
   });
 });

@@ -1,5 +1,5 @@
 import {randomBytes, timingSafeEqual} from 'node:crypto';
-import {LarkCli} from '../lark-cli.js';
+import {LarkCli, noActiveConsumers} from '../lark-cli.js';
 import {parseMessage, type IncomingMessage} from '../message.js';
 import {acquireLock} from '../lock.js';
 import {botLeaseDirectory} from '../bot-service.js';
@@ -31,8 +31,10 @@ export async function waitForPairing(input: {
 }): Promise<IncomingMessage> {
   input.signal.throwIfAborted();
   let release: () => Promise<void>;
-  try {release = await (input.lease ?? (() => acquireLock(botLeaseDirectory(input.botOpenId))))();}
-  catch {throw new PairingError('BUSY');}
+  try {
+    release = await (input.lease ?? (() => acquireLock(botLeaseDirectory(input.botOpenId),
+      {takeover: () => noActiveConsumers({profile: input.profile, executable: input.executable})})))();
+  } catch {throw new PairingError('BUSY');}
   const transport = input.transport ?? new LarkCli({profile: input.profile, executable: input.executable});
   let expired: ReturnType<typeof setTimeout> | undefined;
   let abort: () => void = () => undefined;

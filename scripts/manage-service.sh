@@ -86,9 +86,9 @@ NODE
 }
 
 assert_unlocked() {
-  # A stale lock is not proof that its former process or children have exited.
-  # Recovery is deliberate; this wrapper never deletes an instance lock.
-  local state_dir
+  # This wrapper never deletes an instance lock. The service itself recovers one
+  # only after verifying that its owner exited and no event consumer remains.
+  local state_dir lock_pid
   state_dir="$(node --input-type=module - "$config_file" <<'NODE'
 import fs from 'node:fs';
 import path from 'node:path';
@@ -97,11 +97,14 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 process.stdout.write(path.resolve(path.dirname(configPath), config.stateDir ?? '.state'));
 NODE
 )"
-  if [[ -e "$state_dir/instance.lock" ]]; then
-    printf 'Instance lock exists: %s\n' "$state_dir/instance.lock" >&2
-    printf 'Stop the previous instance and verify its children have exited. Do not remove a live lock.\n' >&2
+  [[ -e "$state_dir/instance.lock" ]] || return 0
+  lock_pid="$(/bin/cat "$state_dir/instance.lock/pid" 2>/dev/null || true)"
+  if [[ "$lock_pid" =~ ^[0-9]+$ ]] && /bin/kill -0 "$lock_pid" 2>/dev/null; then
+    printf 'Instance lock is held by running PID %s: %s\n' "$lock_pid" "$state_dir/instance.lock" >&2
+    printf 'Stop that instance first. Do not remove a live lock.\n' >&2
     return 1
   fi
+  printf 'Found a lock from an exited process; the service will verify and recover it on start.\n'
 }
 
 start_service() {
@@ -128,8 +131,8 @@ stop_service() {
   local previous_pid current_pid remaining
   previous_pid="$(service_pid)"
   if [[ -n "$previous_pid" ]]; then
-    # KeepAlive is disabled: crashes retain the state lock for deliberate
-    # recovery instead of entering a restart loop. Never kickstart -k to reload.
+    # KeepAlive is disabled: a crash never enters a restart loop; the next start
+    # recovers the exited process's lock. Never kickstart -k to reload.
     /bin/launchctl kill SIGTERM "$service_target"
     remaining=45
     while /bin/kill -0 "$previous_pid" 2>/dev/null; do

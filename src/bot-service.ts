@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { BotConfig } from './config.js';
-import { LarkCli } from './lark-cli.js';
+import { LarkCli, noActiveConsumers } from './lark-cli.js';
 import { DshRuntime } from './dsh-runtime.js';
 import { DiskLedger } from './ledger.js';
 import { BotBridge } from './bridge.js';
@@ -37,7 +37,9 @@ export async function createBotService(ctx: Context, config: BotConfig,
   const releaseState = await acquireLock(config.stateDir);
   let releaseBot: (() => Promise<void>) | undefined;
   try {
-    releaseBot = await acquireLock(botLeaseDirectory(config.botOpenId));
+    // An exited owner's CLI children may still be consuming this app; recover only when none are.
+    releaseBot = await acquireLock(botLeaseDirectory(config.botOpenId),
+      {takeover: () => noActiveConsumers({profile: config.profile, executable: config.executable})});
     const ledger = await DiskLedger.open(config.stateDir);
     const openingStores = [
       SessionStore.open(config.stateDir), MemoryStore.open(config.stateDir),

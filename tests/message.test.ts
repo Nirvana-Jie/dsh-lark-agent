@@ -53,9 +53,10 @@ describe('parseMessage', () => {
     expect(parseMessage(raw, bot)?.text).toBe('hello <at user_id="ou_other">Bob</at>');
   });
 
-  it('selects a valid thread id and falls back to the root message id', () => {
+  it('selects only a valid thread id; a quote reply root stays in the current conversation', () => {
     expect(parseMessage(event({thread_id: 'omt_thread', root_id: 'om_root'}), bot)?.threadId).toBe('omt_thread');
-    expect(parseMessage(event({thread_id: 'invalid', root_id: 'om_root'}), bot)?.threadId).toBe('om_root');
+    expect(parseMessage(event({thread_id: 'invalid', root_id: 'om_root'}), bot)?.threadId).toBe('');
+    expect(parseMessage(event({root_id: 'om_root', reply_to: 'om_parent'}), bot)?.threadId).toBe('');
     expect(parseMessage(event({thread_id: 'invalid', root_id: 'invalid'}), bot)?.threadId).toBe('');
   });
 });
