@@ -75,7 +75,7 @@
 - 用户要求接入操作留档：实际进行 PC App / Web 安装与启用、扫码创建、本人配对、首次回复、模型切换、作品展示和重启验证时，同步采集关键截图及可用的连续录屏。记录宿主与插件版本、操作顺序、结果和未覆盖步骤；录制随已授权的实际操作进行，不为拍摄重复安装、配对或申请权限。
 - 原始截图、录屏、采集清单和制作草稿放 `.runtime/recordings/<流程>-<日期>/`，保持 Git 忽略。公开前收起私人会话列表，检查账号、真实消息、记忆、路径、凭据、二维码和配对词；精选素材及必要源放 `assets/readme/`，可复制步骤同步写入中英文 README 或 DEVELOPMENT.md。公开文档中的图片不加来源说明文字；模拟示意须在画面内自带标注（如介绍视频），不能把缺少的实际操作剪接成已验证成功。
 - 提交使用明确文件路径。不要强制添加被忽略的过程文档、真实团队配置、消息、记忆、凭据、过程截图或安装包；不要在 README / README_zh / DEVELOPMENT.md / AGENTS 中写本机身份、真实路径、测试标记或阶段性测试数量。
-- 包内容由 `package.json.files` 的白名单控制，公开媒体逐文件列出。调整后用 `pnpm --config.ignore-scripts=true pack --dry-run --json` 检查，确认无 `docs/`、`.runtime/` 和真实配置。`--config.ignore-scripts=true` 避免文档检查触发构建。
+- 包内容由 `package.json.files` 的白名单控制：只发布运行所需的 `dist`（不含 source map 和 `dist/client/` 下的 tsc 产物）与 `cordis.patch.yml`；文档与媒体只留在仓库。README.md 同时是 npm 页面，其中图片和文档链接用 GitHub 绝对地址；客户端内联的图标不超过 256 像素。调整后用 `pnpm --config.ignore-scripts=true pack --dry-run --json` 检查，确认无 `assets/`、`docs/`、`.runtime/` 和真实配置。`--config.ignore-scripts=true` 避免文档检查触发构建。
 - 发布前检查暂存文件与实际 tgz：扫描密钥、真实身份及平台 ID、联调标记、本机路径；复核媒体画面及元数据。测试使用虚构标识，不复制真实响应中的身份或凭据；审计报告存 `.runtime/`。版本以 `package.json` 为准，同步中英文 README 与 DEVELOPMENT.md 的安装示例。
 - 本地 `docs/` 是非权威历史材料，不要求其他开发者或代理读取它。仅在用户明确要求时重建 Git 历史；新仓库也须通过上述发布检查。
 

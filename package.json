@@ -1,6 +1,6 @@
 {
   "name": "dsh-lark-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reach your DeepSeek Harness assistant from Feishu / Lark: a dsh plugin built on the official Lark CLI",
   "keywords": [
     "deepseek",
@@ -37,25 +37,10 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "assets/plugin-icon.png",
-    "assets/feishu-logo.png",
-    "assets/deepseek-harness-icon.png",
-    "assets/readme/desktop-install-01.jpg",
-    "assets/readme/desktop-install-02.jpg",
-    "assets/readme/desktop-install-03.jpg",
-    "assets/readme/desktop-install-steps.mp4",
-    "assets/readme/onboarding-connected.jpg",
-    "assets/readme/intro.gif",
-    "assets/readme/intro.mp4",
-    "assets/readme/rich-chart.png",
-    "assets/readme/rich-form.png",
     "dist",
-    "cordis.patch.yml",
-    "team.config.example.json",
-    "README.md",
-    "README_zh.md",
-    "DEVELOPMENT.md",
-    "LICENSE"
+    "!dist/**/*.map",
+    "!dist/client/**/*.js",
+    "cordis.patch.yml"
   ],
   "engines": {
     "node": ">=22.12"
