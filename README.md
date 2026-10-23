@@ -4,11 +4,11 @@
 
 [中文](README_zh.md)
 
-[![npm version](https://img.shields.io/npm/v/dsh-larkbot)](https://www.npmjs.com/package/dsh-larkbot)
+[![npm version](https://img.shields.io/npm/v/dsh-lark-agent)](https://www.npmjs.com/package/dsh-lark-agent)
 
 **Reach your [DeepSeek Harness](https://www.deepseek.com/harness/) assistant from Feishu / Lark when you're away from your computer.**
 
-[`dsh-larkbot`](https://www.npmjs.com/package/dsh-larkbot) adds a Feishu / Lark private chat to a running DeepSeek Harness: hand off tasks, talk through plans, and pick up earlier topics from your phone. Feishu gets its own sessions and never takes over chats already open in the desktop app or on the web.
+dsh-larkbot (npm package [`dsh-lark-agent`](https://www.npmjs.com/package/dsh-lark-agent)) adds a Feishu / Lark private chat to a running DeepSeek Harness: hand off tasks, talk through plans, and pick up earlier topics from your phone. Feishu gets its own sessions and never takes over chats already open in the desktop app or on the web.
 
 [![dsh-larkbot illustrated walkthrough (Feishu chat redrawn with demo data, not a screen recording): from the Harness settings page into a Feishu private chat that returns chart and form cards](assets/readme/intro.gif)](assets/readme/intro.mp4)
 
@@ -28,7 +28,7 @@ Before you start:
 
 ### Install on the DeepSeek Harness desktop app
 
-In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter `dsh-larkbot`, click **安装** (Install), then **立即启用** (Enable now). Restart if the app asks.
+In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter `dsh-lark-agent`, click **安装** (Install), then **立即启用** (Enable now). Restart if the app asks.
 
 <img src="assets/readme/desktop-install-02.jpg" width="720" alt="The Add plugin dialog in the DeepSeek Harness desktop app">
 
@@ -37,7 +37,7 @@ In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
 
 ```sh
-dsh plugin --profile web add dsh-larkbot --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent --allow-build=protobufjs
 ```
 
 Then restart `dsh web`.
@@ -54,7 +54,7 @@ Then restart `dsh web`.
 ### Update
 
 1. On the Feishu settings page, click **暂停连接** (pause) and back up as described in [Upgrade](DEVELOPMENT.md#升级).
-2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-larkbot` on the Plugins page and add it again (this in-app upgrade hasn't been tested end to end yet). CLI: run `dsh plugin --profile web update dsh-larkbot@latest`, then restart `dsh web`.
+2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (this in-app upgrade hasn't been tested end to end yet; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.
 3. Click **恢复连接** (resume) and check that the bot replies.
 
 ## Connect Feishu

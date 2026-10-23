@@ -4,11 +4,11 @@
 
 [English](README.md)
 
-[![npm version](https://img.shields.io/npm/v/dsh-larkbot)](https://www.npmjs.com/package/dsh-larkbot)
+[![npm version](https://img.shields.io/npm/v/dsh-lark-agent)](https://www.npmjs.com/package/dsh-lark-agent)
 
 **离开电脑，也能在飞书里找到你的 [DeepSeek Harness](https://www.deepseek.com/harness/) 助手。**
 
-[`dsh-larkbot`](https://www.npmjs.com/package/dsh-larkbot) 给运行中的 DeepSeek Harness 加一个飞书私聊入口：在手机上交代需求、讨论方案、继续之前的话题。飞书使用独立会话，不接管桌面或 Web 中已有的聊天。
+dsh-larkbot（npm 包名 [`dsh-lark-agent`](https://www.npmjs.com/package/dsh-lark-agent)）给运行中的 DeepSeek Harness 加一个飞书私聊入口：在手机上交代需求、讨论方案、继续之前的话题。飞书使用独立会话，不接管桌面或 Web 中已有的聊天。
 
 [![dsh-larkbot 交互示意（飞书聊天用演示数据重绘，非实录）：从 Harness 设置页进入飞书私聊，收到图表与表单卡片](assets/readme/intro.gif)](assets/readme/intro.mp4)
 
@@ -28,7 +28,7 @@
 
 ### 在 DeepSeek Harness 桌面版中安装
 
-在侧栏打开 **插件 → 添加插件**，填入 `dsh-larkbot`，点「安装」，再点「立即启用」；需要时按提示重启。
+在侧栏打开 **插件 → 添加插件**，填入 `dsh-lark-agent`，点「安装」，再点「立即启用」；需要时按提示重启。
 
 <img src="assets/readme/desktop-install-02.jpg" width="720" alt="DeepSeek Harness 桌面版的添加插件弹窗">
 
@@ -37,7 +37,7 @@
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) 会调用 pnpm，需先装好 pnpm 并确保它在 PATH 中：
 
 ```sh
-dsh plugin --profile web add dsh-larkbot --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent --allow-build=protobufjs
 ```
 
 然后重启 `dsh web`。
@@ -54,7 +54,7 @@ dsh plugin --profile web add dsh-larkbot --allow-build=protobufjs
 ### 更新
 
 1. 在飞书设置页点「暂停连接」，按[升级](DEVELOPMENT.md#升级)备份。
-2. 桌面版：在插件页卸载 `dsh-larkbot` 后重新添加（弹窗提示第三方插件需先卸载再安装新版；App 内升级尚未实机验证）。CLI：运行 `dsh plugin --profile web update dsh-larkbot@latest`，再重启 `dsh web`。
+2. 桌面版：在插件页卸载 `dsh-lark-agent` 后重新添加（弹窗提示第三方插件需先卸载再安装新版；App 内升级尚未实机验证；更早从源码安装的版本显示为 `dsh-larkbot`）。CLI：运行 `dsh plugin --profile web update dsh-lark-agent@latest`，再重启 `dsh web`。
 3. 点「恢复连接」，确认机器人能回复。
 
 ## 连接飞书
