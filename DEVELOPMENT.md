@@ -1,4 +1,4 @@
-# dsh-larkbot 使用与开发文档
+# dsh-lark-agent 使用与开发文档
 
 安装与接入见 [README](README_zh.md)（[English](README.md)），代理与贡献者规则见 [AGENTS.md](AGENTS.md)。
 
@@ -86,6 +86,8 @@
 3. 安装新版：Web 运行 `dsh plugin --profile web update dsh-lark-agent@latest` 并重启 `dsh web`；App 按「添加插件」弹窗提示，先在插件页卸载旧版 `dsh-lark-agent`（更早从源码安装的显示为 `dsh-larkbot`），再添加 `dsh-lark-agent`（App 内升级尚未实机验证）。
 4. 「恢复连接」，确认收到实际回复。
 
+项目改名为 dsh-lark-agent 后，插件 ID、数据目录 `~/.dsh-larkbot/` 与日志前缀 `[im-larkbot]` 保持不变，升级无需迁移数据。
+
 ## 私聊底部菜单
 
 机器人私聊的输入框上方常驻「新话题」「历史对话」「设置」悬浮菜单，无需另建飞书智能体；需飞书客户端 ≥ 7.22；群聊不显示，继续用 @ 和命令。由应用创建者在[飞书开发者后台](https://open.feishu.cn/app)配置，发布可能需企业审批：
@@ -154,7 +156,7 @@ App 路由契约（[client-modern-host](tests/client-modern-host.test.tsx) 测�
 
 **从源码安装：** `pnpm pack` 经 `prepack` 构建 `dist/` 后打包，最后一行输出 tgz 文件名；安装时用 tgz 的绝对路径代替包名（App「添加插件」或 `dsh plugin --profile web add <tgz 绝对路径> --allow-build=protobufjs`），运行中重建见[备份、升级与迁移](#备份升级与迁移)。
 
-**发布 npm：** `main` 受保护，只能经 PR 合并，且两个 CI 任务须通过。维护者在 PR 中更新版本（`pnpm version patch --no-git-tag-version`，或 minor / major），合并后按 AGENTS.md 完成发布前检查，给 `main` 上的合并提交打标签并推送（`git tag v<版本> origin/main && git push origin v<版本>`）。[release.yml](.github/workflows/release.yml) 校验标签与 `package.json` 版本一致且在 `main` 上，运行 `pnpm check`、构建并核对包内文件，再经 npm Trusted Publishing（OIDC，仓库不存 npm token）用 `npm stage publish` 暂存并附来源证明：含 `-` 的预发布版本发到 `next`，其余发到 `latest`；最后创建 GitHub Release。暂存版本在维护者用 2FA 批准前不公开：在 npmjs.com 该包的 Staged Packages 页批准，或 `npm stage list dsh-lark-agent` 查到 ID 后 `npm stage approve <stage-id>`；已暂存的版本不要重跑流水线。npm 上已有的版本只补建 Release，不重复发布。工作流依赖 npm 包设置中的 Trusted Publisher（仓库 `Nirvana-Jie/dsh-larkbot`、工作流 `release.yml`，只需 npm stage publish 权限）。
+**发布 npm：** `main` 受保护，只能经 PR 合并，且两个 CI 任务须通过。维护者在 PR 中更新版本（`pnpm version patch --no-git-tag-version`，或 minor / major），合并后按 AGENTS.md 完成发布前检查，给 `main` 上的合并提交打标签并推送（`git tag v<版本> origin/main && git push origin v<版本>`）。[release.yml](.github/workflows/release.yml) 校验标签与 `package.json` 版本一致且在 `main` 上，运行 `pnpm check`、构建并核对包内文件，再经 npm Trusted Publishing（OIDC，仓库不存 npm token）用 `npm stage publish` 暂存并附来源证明：含 `-` 的预发布版本发到 `next`，其余发到 `latest`；最后创建 GitHub Release。暂存版本在维护者用 2FA 批准前不公开：在 npmjs.com 该包的 Staged Packages 页批准，或 `npm stage list dsh-lark-agent` 查到 ID 后 `npm stage approve <stage-id>`；已暂存的版本不要重跑流水线。npm 上已有的版本只补建 Release，不重复发布。工作流依赖 npm 包设置中的 Trusted Publisher（仓库 `Nirvana-Jie/dsh-lark-agent`、工作流 `release.yml`，只需 npm stage publish 权限）。
 
 **图标与媒体：** 替换图标时保持比例与透明背景，客户端内联的图标不超过 256 像素；文档媒体（README 与本文）放 `assets/readme/`，只留在仓库、不进 npm 包。README.md 也是 npm 页面，图片和文档链接须用 GitHub 绝对地址。npm 包只含运行所需的 `dist`（不含 source map）与 `cordis.patch.yml`。
 
@@ -235,7 +237,7 @@ export DSH_TELEMETRY_DISABLED=1
   "stateDir": ".state",
   "users": [{
     "openId": "ou_REPLACE_WITH_USER_OPEN_ID", "direct": true, "groupChats": [],
-    "cwd": "/absolute/path/to/dsh-larkbot/.runtime/workspaces/alice", "allowedTools": []
+    "cwd": "/absolute/path/to/dsh-lark-agent/.runtime/workspaces/alice", "allowedTools": []
   }]
 }
 ```
