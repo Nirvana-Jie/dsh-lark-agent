@@ -32,8 +32,8 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
-      # Trusted Publishing needs npm 11.5.1 or later.
-      - run: npm install -g npm@11
+      # `npm stage publish` needs npm 11.15.0 or later.
+      - run: npm install -g npm@^11.15.0
       - name: Check the tag
         id: release
         run: |
@@ -51,6 +51,8 @@ jobs:
           # A version already on npm (such as a manual first publish) only gets its GitHub Release.
           if npm view "$name@$version" version >/dev/null 2>&1; then published=true; else published=false; fi
           {
+            echo "name=$name"
+            echo "version=$version"
             echo "channel=$channel"
             echo "published=$published"
           } >> "$GITHUB_OUTPUT"
@@ -69,9 +71,19 @@ jobs:
             if (missing.length || unexpected.length) throw new Error(`missing: ${missing}; unexpected: ${unexpected}`);
             if (pack.unpackedSize > 1024 * 1024) throw new Error(`unpacked size ${pack.unpackedSize} exceeds 1 MiB`);
           ' "$RUNNER_TEMP/pack.json"
-      - name: Publish to npm
+      # The trusted publisher only allows staging. A staged version stays hidden
+      # until a maintainer approves it with 2FA, so do not re-run a staged release.
+      - name: Stage on npm
         if: steps.release.outputs.published == 'false'
-        run: npm publish --ignore-scripts --provenance --access public --tag "${{ steps.release.outputs.channel }}"
+        env:
+          NAME: ${{ steps.release.outputs.name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          npm stage publish --ignore-scripts --provenance --access public --tag "${{ steps.release.outputs.channel }}"
+          {
+            echo "### Approve $NAME@$VERSION on npm"
+            echo "It is staged, not public yet. Approve it with 2FA on npmjs.com (the package's Staged Packages tab), or find its stage ID with \`npm stage list $NAME\` and run \`npm stage approve <stage-id>\`."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
