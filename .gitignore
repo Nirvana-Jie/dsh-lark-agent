@@ -1,0 +1,34 @@
+node_modules/
+# pnpm-lock.yaml is the only dependency lockfile.
+package-lock.json
+yarn.lock
+dist/
+coverage/
+.state/
+.dsh-team/
+.dsh-lark-results/
+/.dsh/
+/.dsh-larkbot/
+/.lark-cli/
+.pnpm-store/
+.runtime/
+# Local development notes and reports; public integration guidance lives in README.md.
+/docs/
+*.log
+.DS_Store
+team.config.json
+team.config.*.json
+!team.config.example.json
+*.tgz
+.env
+.env.*
+!.env.example
+# Local registry credentials and private keys never belong in the repository.
+.npmrc
+.pnpmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.keychain
+*.keychain-db

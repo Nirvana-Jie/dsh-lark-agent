@@ -1,0 +1,12 @@
+# Keep installs rooted here, including when the checkout lives in another workspace.
+packages:
+  - .
+
+packageManagerStrictVersion: true
+
+# Native binaries used by the builder and the host's filesystem locking.
+allowBuilds:
+  esbuild: true
+  koffi: true
+  # Only emits a dependency-version hint; no runtime artifact is generated.
+  protobufjs: false

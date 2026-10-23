@@ -1,0 +1,98 @@
+import {describe, expect, it, vi} from 'vitest';
+import {registerConnectionRpc} from '../src/onboarding/host.js';
+import {ConnectionController, SetupError, officialDestination} from '../src/onboarding/controller.js';
+import type {ConnectionResult} from '../src/onboarding/protocol.js';
+
+type Handler = (endpoint: string, payload: unknown, signal: AbortSignal,
+  peer?: {principal?: {kind?: string}}) => Promise<ConnectionResult<unknown>>;
+const owner = {principal: {kind: 'owner'}};
+function fixture(legacy = false) {
+  let callback!: Handler;
+  const remove = vi.fn(async () => undefined);
+  const registered = vi.fn();
+  const rpc = legacy ? {handle(channel: string, handler: Handler, options?: {authority: 'loopback'}) {
+    callback = handler; registered(channel, options); return remove;
+  }} : {handle(channel: string, handler: Handler) {callback = handler; registered(channel); return remove;}};
+  const controller = {snapshot: vi.fn(() => ({phase: 'idle'})), profiles: vi.fn(async () => []),
+    command: vi.fn(async () => ({phase: 'creating'}))};
+  const cleanup = registerConnectionRpc(rpc, controller as unknown as ConnectionController);
+  const signal = new AbortController().signal;
+  return {controller, registered, remove, cleanup, signal,
+    invoke: (endpoint: string, payload: unknown = {}, peer: Parameters<Handler>[3] = owner) => callback(endpoint, payload, signal, peer),
+    noPeer: (endpoint: string, payload: unknown = {}) => callback(endpoint, payload, signal)};
+}
+
+describe('owner-only onboarding RPC', () => {
+  it('requires an owner peer on the modern host, including for read-only state and profile metadata', async () => {
+    const h = fixture();
+    for (const endpoint of ['status', 'profiles', 'create']) {
+      expect(await h.noPeer(endpoint)).toMatchObject({ok: false});
+      expect(await h.invoke(endpoint, {}, {principal: {kind: 'guest'}})).toMatchObject({ok: false});
+      expect(await h.invoke(endpoint, {}, {})).toMatchObject({ok: false});
+    }
+    expect(h.controller.snapshot).not.toHaveBeenCalled();
+    expect(h.controller.profiles).not.toHaveBeenCalled(); expect(h.controller.command).not.toHaveBeenCalled();
+  });
+
+  it('registers the legacy handler with a loopback fence and rejects explicit non-owner peers', async () => {
+    const h = fixture(true);
+    expect(h.registered).toHaveBeenCalledWith('/larkbot', {authority: 'loopback'});
+    expect(await h.noPeer('status')).toEqual({ok: true, value: {phase: 'idle'}});
+    expect(await h.invoke('status', {}, {principal: {kind: 'remote'}})).toMatchObject({ok: false});
+    expect(h.controller.snapshot).toHaveBeenCalledOnce();
+    await h.cleanup(); expect(h.remove).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed for an unrecognized RPC signature', () => {
+    const rpc = {handle(_channel: string) {return async () => undefined;}};
+    expect(() => registerConnectionRpc(rpc, {} as ConnectionController)).toThrow(SetupError);
+  });
+
+  it('passes only recognized commands with safe payloads and preserves profile request cancellation', async () => {
+    const h = fixture();
+    expect(await h.invoke('create', {cards: false, loading: true})).toMatchObject({ok: true});
+    expect(h.controller.command).toHaveBeenCalledWith('create', {cards: false, loading: true});
+    expect(await h.invoke('profiles')).toEqual({ok: true, value: []});
+    expect(h.controller.profiles).toHaveBeenCalledWith(h.signal);
+    expect(await h.invoke('status')).toEqual({ok: true, value: {phase: 'idle'}});
+  });
+
+  it.each([null, [], 'secret', 0, true, {appSecret: 'never-show'}, {ownerOpenId: 'ou_attacker'},
+    {profile: 'unexpected'}, {cards: {nested: true}}, {cards: 'false'}, {loading: 'false'}])(
+    'rejects malformed or overbroad create payloads before controller dispatch', async payload => {
+      const h = fixture();
+      expect(await h.invoke('create', payload)).toMatchObject({ok: false});
+      expect(h.controller.command).not.toHaveBeenCalled();
+    });
+
+  it.each([['use-profile', {name: true}], ['confirm-owner', {id: false}],
+    ['use-profile', {name: 'a'.repeat(201)}], ['pause', {name: 'unexpected'}],
+    ['status', {token: 'private'}], ['profiles', {all: true}], ['unknown-secret-operation', {}], ['__proto__', {}]])(
+    'rejects invalid endpoint or field types: %s', async (endpoint, payload) => {
+      const h = fixture();
+      const result = await h.invoke(endpoint, payload);
+      expect(result).toMatchObject({ok: false, error: {details: {}}});
+      expect(JSON.stringify(result)).not.toContain('unknown-secret');
+      expect(h.controller.command).not.toHaveBeenCalled(); expect(h.controller.snapshot).not.toHaveBeenCalled();
+      expect(h.controller.profiles).not.toHaveBeenCalled();
+    });
+
+  it('does not echo arbitrary errors or diagnostics into the public RPC result', async () => {
+    const h = fixture();
+    h.controller.command.mockRejectedValue(new Error('APP_SECRET=do-not-reflect'));
+    const result = await h.invoke('pause');
+    expect(result).toMatchObject({ok: false, error: {code: 'internal', details: {}}});
+    expect(JSON.stringify(result)).not.toContain('APP_SECRET');
+  });
+});
+
+describe('official registration destinations', () => {
+  it('keeps an opaque official URL intact', () => {
+    const url = 'https://open.feishu.cn/page/cli?user_code=fixture%2Bvalue&addons=a%2Fb';
+    expect(officialDestination(url)).toBe(url);
+  });
+  it.each(['http://open.feishu.cn/x', 'https://open.feishu.cn.evil.test/x', 'https://evil.test/feishu.cn',
+    'https://user:password@open.feishu.cn/x', 'javascript:alert(1)', 'https://open.feishu.cn:9999/x'])('rejects unsafe destination %s', url => {
+      expect(() => officialDestination(url)).toThrow();
+    });
+});

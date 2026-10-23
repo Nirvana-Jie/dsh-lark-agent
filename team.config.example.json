@@ -1,0 +1,35 @@
+{
+  "profile": "dsh-team-bot",
+  "botOpenId": "ou_REPLACE_WITH_BOT_OPEN_ID",
+  "stateDir": ".state",
+  "users": [
+    {
+      "openId": "ou_REPLACE_WITH_ALICE_OPEN_ID",
+      "direct": true,
+      "groupChats": [
+        "oc_REPLACE_WITH_ALLOWED_GROUP"
+      ],
+      "cwd": "/absolute/path/to/workspaces/alice",
+      "allowedTools": []
+    },
+    {
+      "openId": "ou_REPLACE_WITH_BOB_OPEN_ID",
+      "direct": true,
+      "groupChats": [],
+      "cwd": "/absolute/path/to/workspaces/bob",
+      "allowedTools": []
+    }
+  ],
+  "turnTimeoutMs": 120000,
+  "idleTimeoutMs": 1800000,
+  "maxSessions": 100,
+  "maxSessionsPerUser": 10,
+  "maxPending": 100,
+  "maxPendingPerSession": 5,
+  "maxInputChars": 16000,
+  "maxOutputChars": 32000,
+  "chunkBytes": 4000,
+  "responseMode": "auto",
+  "cardInteractions": false,
+  "loadingReaction": false
+}
