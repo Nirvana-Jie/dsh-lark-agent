@@ -8,6 +8,7 @@
 2. 实现行为变更时，在相关 Vitest 用例中验证行为和边界。修复缺陷优先加入能复现问题的用例。
 3. 运行相关测试和 `pnpm typecheck`。涉及多模块契约、权限、持久化或关闭流程时，再运行 `pnpm test`。具体 scripts 以 `package.json` 为准。
 4. 完成前检查 `git diff --check` 和暂存差异；交付说明写清改动、实际验证及未验证项。文档和清单变更直接检查链接、忽略规则及打包清单即可。
+5. `main` 受保护，不能直接推送：改动在分支上提交，经 PR 合并，CI 通过后才能合并。发版时在 PR 中改版本，合并后再给 `main` 打 `v<版本>` 标签。
 
 依赖统一由 `packageManager` 指定的 pnpm 管理，提交 `pnpm-lock.yaml`；全新安装使用 `pnpm install --frozen-lockfile`，更新依赖使用 `pnpm add` / `pnpm remove`。开发基线显式声明依赖，保留严格解析，不用 hoist 掩盖缺失声明。
 
