@@ -12,7 +12,7 @@ coverage/
 /.lark-cli/
 .pnpm-store/
 .runtime/
-# Local development notes and reports; public integration guidance lives in README.md.
+# Local development notes and reports; public docs are README.md / README_zh.md (intro and setup) and DEVELOPMENT.md (usage, deployment, development).
 /docs/
 *.log
 .DS_Store

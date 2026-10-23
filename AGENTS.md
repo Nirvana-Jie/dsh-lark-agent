@@ -1,6 +1,6 @@
-# dsh-larkbot 开发指南
+# dsh-larkbot 代理工作规则
 
-这是 TypeScript ESM 的 dsh / Cordis 飞书插件，包含宿主服务和 Web / App 设置界面。飞书是个人助手的移动入口：通道历史独立，记忆在后台工作；选择旧话题、确认操作和复杂结果才使用卡片。接入和运维以 [README.md](README.md) 为准。
+这是 TypeScript ESM 的 dsh / Cordis 飞书插件，包含宿主服务和 Web / App 设置界面。飞书是个人助手的移动入口：通道历史独立，记忆在后台工作；选择旧话题、确认操作和复杂结果才使用卡片。[README.md](README.md)（英文）与 [README_zh.md](README_zh.md)（中文）只介绍能做什么和如何安装接入；命令、隐私、升级、部署、运维、排障与开发以 [DEVELOPMENT.md](DEVELOPMENT.md)（使用与开发文档）为准。
 
 ## 开始与完成
 
@@ -34,7 +34,7 @@
 | 结构化作品、表单、云端图示与报告 | `src/presentation.ts`、`src/artifacts.ts`、`src/artifact-publisher.ts`、`src/rich-scopes.ts` | `presentation`、`artifacts`、`artifact-publisher`、`presentation-flow`；兼容矩阵里的原生展示工具 |
 | Harness 原生作品卡与本地预览 | `src/native-presentation.ts`、`src/dsh-runtime.ts` | `native-presentation`、`dsh-runtime-model-native`；公开交付事件、原生 checkpoint、实际侧栏预览 |
 
-表中简写测试名对应 `tests/<名称>.test.ts` 或 `.test.tsx`；onboarding 行的省略路径均在 `src/onboarding/`。修改接入、打包或运行脚本时，同步 README 的可复制步骤；修改用户可见行为时，同步基础帮助和模型表达。
+表中简写测试名对应 `tests/<名称>.test.ts` 或 `.test.tsx`；onboarding 行的省略路径均在 `src/onboarding/`。修改接入、打包或运行脚本时，同步中英文 README / DEVELOPMENT.md 中的可复制步骤；修改用户可见行为时，同步中英文 README、DEVELOPMENT.md、基础帮助和模型表达。
 
 宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` 的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
 
@@ -70,13 +70,13 @@
 
 ## 文档与产物治理
 
-- 版本库中的项目文档只有 `README.md`（开发者接入与运行契约）和本文件（代理工作规则）。稳定约定更新到这两个入口，细节链接实际源码或测试。
-- 方案草稿、研究、联调清单、验收结果、排障笔记写到本地 `docs/`；运行数据、日志、备份和构建验证写到 `.runtime/`。两处均被忽略，不能作为公开文档的必要依赖。
+- 版本库中的项目文档只有 `README.md` / `README_zh.md`（英文 / 中文，内容保持一致：介绍视频、安装与更新、连接飞书、能做什么）、`DEVELOPMENT.md`（命令、能力上限、连接管理、隐私、升级、底部菜单，以及运行方式、部署、运维、排障与开发契约）和本文件（代理工作规则）。稳定约定更新到这三类入口（中英文 README、DEVELOPMENT.md、本文件），细节链接实际源码或测试；README 保持简短，其余内容放 DEVELOPMENT.md，需要时链接对应章节。
+- 方案草稿、研究、联调清单、验收结果和一次性排障记录写到本地 `docs/`（稳定的排障步骤写入 DEVELOPMENT.md 的「排障」）；运行数据、日志、备份和构建验证写到 `.runtime/`。两处均被忽略，不能作为公开文档的必要依赖。
 - 用户要求接入操作留档：实际进行 PC App / Web 安装与启用、扫码创建、本人配对、首次回复、模型切换、作品展示和重启验证时，同步采集关键截图及可用的连续录屏。记录宿主与插件版本、操作顺序、结果和未覆盖步骤；录制随已授权的实际操作进行，不为拍摄重复安装、配对或申请权限。
-- 原始截图、录屏、采集清单和制作草稿放 `.runtime/recordings/<流程>-<日期>/`，保持 Git 忽略。公开前收起私人会话列表，检查账号、真实消息、记忆、路径、凭据、二维码和配对词；精选素材及必要源放 `assets/readme/`，可复制步骤写入 README。连续实录、截图关键帧回放和模拟示意分别标注，不能把缺少的实际操作剪接成已验证成功。
-- 提交使用明确文件路径。不要强制添加被忽略的过程文档、真实团队配置、消息、记忆、凭据、过程截图或安装包；不要在 README / AGENTS 中写本机身份、真实路径、测试标记或阶段性测试数量。
+- 原始截图、录屏、采集清单和制作草稿放 `.runtime/recordings/<流程>-<日期>/`，保持 Git 忽略。公开前收起私人会话列表，检查账号、真实消息、记忆、路径、凭据、二维码和配对词；精选素材及必要源放 `assets/readme/`，可复制步骤同步写入中英文 README 或 DEVELOPMENT.md。公开文档中的图片不加来源说明文字；模拟示意须在画面内自带标注（如介绍视频），不能把缺少的实际操作剪接成已验证成功。
+- 提交使用明确文件路径。不要强制添加被忽略的过程文档、真实团队配置、消息、记忆、凭据、过程截图或安装包；不要在 README / README_zh / DEVELOPMENT.md / AGENTS 中写本机身份、真实路径、测试标记或阶段性测试数量。
 - 包内容由 `package.json.files` 的白名单控制，公开媒体逐文件列出。调整后用 `pnpm --config.ignore-scripts=true pack --dry-run --json` 检查，确认无 `docs/`、`.runtime/` 和真实配置。`--config.ignore-scripts=true` 避免文档检查触发构建。
-- 发布前检查暂存文件与实际 tgz：扫描密钥、真实身份及平台 ID、联调标记、本机路径；复核媒体画面及元数据。测试使用虚构标识，不复制真实响应中的身份或凭据；审计报告存 `.runtime/`。版本以 `package.json` 为准，同步 README 安装示例。
+- 发布前检查暂存文件与实际 tgz：扫描密钥、真实身份及平台 ID、联调标记、本机路径；复核媒体画面及元数据。测试使用虚构标识，不复制真实响应中的身份或凭据；审计报告存 `.runtime/`。版本以 `package.json` 为准，同步中英文 README 与 DEVELOPMENT.md 的安装示例。
 - 本地 `docs/` 是非权威历史材料，不要求其他开发者或代理读取它。仅在用户明确要求时重建 Git 历史；新仓库也须通过上述发布检查。
 
 ## 运行实例与验证
@@ -87,4 +87,4 @@
 
 现代宿主矩阵由 `DSH_MODERN_HOST_ROOT` 指向隔离依赖目录启用，目录约定见 `tests/dsh-runtime-modern.test.ts`；使用当前编译产物和真实宿主包，未准备 fixture 时明确报告该矩阵未执行。界面组件测试与原生契约通过不等于真实扫码完成：交付前分别验证插件加载、官方扫码 / 审批、本人私聊配对与确认回复、暂停恢复和宿主重启。
 
-源码插件可能正通过软链接加载本仓库的 `dist/`。静态文档治理不重建或重启服务；需部署代码时按 README 正常停止、备份、构建、启动并检查就绪。独立构建同时运行 `pnpm exec tsc -p tsconfig.json --outDir .runtime/check-build` 和 `pnpm build:client --outdir .runtime/check-build`，核对宿主 JS、客户端入口及必需 runtime imports 均保留。
+源码插件可能正通过软链接加载本仓库的 `dist/`。静态文档治理不重建或重启服务；需部署代码时按 DEVELOPMENT.md 正常停止、备份、构建、启动并检查就绪。独立构建同时运行 `pnpm exec tsc -p tsconfig.json --outDir .runtime/check-build` 和 `pnpm build:client --outdir .runtime/check-build`，核对宿主 JS、客户端入口及必需 runtime imports 均保留。
