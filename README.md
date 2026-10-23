@@ -72,7 +72,7 @@ The Feishu entry works only while the host is online: not when the app is closed
 
 | In Feishu, you… | The assistant… |
 | --- | --- |
-| Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), showing the reply, its thinking and tool progress live in one card |
+| Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card, with its thinking and tool steps folded inside |
 | Ask for something that needs your OK | Sends a confirmation card: tap **允许一次** (allow once) or **拒绝** (deny); no answer within 5 minutes means it won't run |
 | Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
 | Ask for the result file | Sends files from its workspace straight to the chat |

@@ -28,16 +28,16 @@ type Step = {kind: 'reasoning'; text: string}
 
 // CardKit rejects cards over 30 KB, measured on the card JSON.
 const CARD_BYTES = 28_000;
-const LIVE_STEP_BYTES = 8_000;
-const LIVE_ANSWER_BYTES = 14_000;
-const FINAL_STEP_BYTES = 6_000;
+const LIVE_STEP_BYTES = 6_000;
+const LIVE_ANSWER_BYTES = 20_000;
+const FINAL_STEP_BYTES = 8_000;
 const MAX_KEPT_CHARS = 40_000;
 // One card entity accepts at most 10 operations per second.
 const STREAM_INTERVAL_MS = 500;
 const FULL_INTERVAL_MS = 2_000;
 // Feishu turns streaming mode off 10 minutes after it was last turned on.
 const REOPEN_AFTER_MS = 9 * 60_000;
-const CONTINUED = '回复较长，余下内容在下一条消息。';
+const TRUNCATED = '回复超过了飞书卡片的长度上限，后面的内容没有显示。完整回复在电脑上的这段 Harness 会话里，也可以让我整理成文档。';
 const grey = (markdown: string) => `<font color='grey'>${markdown}</font>`;
 const bytes = (value: unknown) => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value), 'utf8');
 const code = (value: string) => '`' + value.replace(/`/g, 'ˋ') + '`';
@@ -76,8 +76,10 @@ function tail(text: string, maxBytes: number): string {
 }
 
 /**
- * One streaming reply card. Only the initial reply is a send; every later
- * operation updates the same card entity and is safe to supersede or repeat.
+ * One streaming reply card: the answer, with reasoning and tool steps in a
+ * panel that stays folded unless the reader opens it. Only the initial reply
+ * is a send; every later operation updates the same card entity and is safe
+ * to supersede or repeat. A reply never continues in another message.
  */
 export class LiveReply {
   private phase: 'thinking' | 'answering' | LiveReplyFinal['phase'] = 'thinking';
@@ -151,12 +153,14 @@ export class LiveReply {
         if (this.answer.length > 70_000) return;
         if (this.separator) { this.answer += '\n\n'; this.separator = false; }
         this.answer += event.text;
+        // The folded panel's title switches from "thinking" to the time it took.
         if (this.phase === 'thinking') { this.phase = 'answering'; this.answeredAt = this.now(); this.layoutDirty = true; }
         break;
       case 'tool':
         if (this.steps.some(step => step.kind === 'tool' && step.callId === event.callId)) return;
         this.steps.push({kind: 'tool', callId: event.callId, name: event.name, ...(event.detail ? {detail: event.detail} : {}), state: 'running'});
         this.tools++;
+        this.layoutDirty = true;
         this.trim();
         break;
       case 'tool-done': {
@@ -169,13 +173,9 @@ export class LiveReply {
     this.schedule();
   }
 
-  /**
-   * Stop streaming and write the final card. Returns the part of the answer
-   * that did not fit, which the caller sends as ordinary replies only when the
-   * final card was confirmed.
-   */
-  async finish(final: LiveReplyFinal): Promise<{overflow: string; confirmed: boolean}> {
-    if (this.closed) return {overflow: '', confirmed: false};
+  /** Stop streaming and write the final card. True only when Feishu confirmed it. */
+  async finish(final: LiveReplyFinal): Promise<boolean> {
+    if (this.closed) return false;
     this.closed = true;
     this.wake?.();
     await this.loop;
@@ -185,18 +185,18 @@ export class LiveReply {
     if (final.reasoning && !this.steps.some(step => step.kind === 'reasoning')) this.steps.unshift({kind: 'reasoning', text: final.reasoning});
     for (const step of this.steps) if (step.kind === 'tool' && step.state === 'running') step.state = final.phase === 'done' ? 'done' : 'failed';
     this.note = final.note;
-    const {card, overflow} = this.finalCard();
-    if (!this.cardId) return {overflow, confirmed: false};
+    const card = this.finalCard();
+    if (!this.cardId) return false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.transport.updateCardEntity(this.cardId, card, ++this.sequence);
-        return {overflow, confirmed: true};
+        return true;
       } catch {
         if (attempt < 2) await this.sleep(500 * 3 ** attempt);
       }
     }
     this.audit('live-card-final-failed');
-    return {overflow, confirmed: false};
+    return false;
   }
 
   private now(): number { return (this.options.now ?? Date.now)(); }
@@ -295,31 +295,37 @@ export class LiveReply {
   private answerContent(): string {
     if (!this.answer) return grey('…');
     const shown = head(this.answer, LIVE_ANSWER_BYTES);
-    return cardMarkdown(shown) + (shown.length < this.answer.length ? `\n\n${grey('……完整内容将在回复结束后显示')}` : '');
+    return cardMarkdown(shown) + (shown.length < this.answer.length ? `\n\n${grey('……')}` : '');
   }
 
   private panelTitle(): string {
-    if (!this.closed) return '思考过程';
+    const tools = this.tools ? ` · 使用工具 ${this.tools} 次` : '';
+    if (this.phase === 'thinking') return `💭 思考中…${tools}`;
     const seconds = Math.max(1, Math.round(((this.answeredAt ?? this.finishedAt ?? this.now()) - this.startedAt) / 1000));
-    return `已思考（用时 ${seconds} 秒）${this.tools ? ` · 使用工具 ${this.tools} 次` : ''}`;
+    return `💭 思考了 ${seconds} 秒${tools}`;
   }
 
-  private card(answer?: string, continued = false): Record<string, unknown> {
-    const final = this.closed;
-    const steps = final ? this.stepsMarkdown(FINAL_STEP_BYTES) : this.thinkContent();
+  /** The folded process panel. Readers open it when they want the reasoning and tool steps. */
+  private panel(content: string): Record<string, unknown> {
+    return {
+      tag: 'collapsible_panel', element_id: 'think_panel', expanded: false,
+      header: {title: {tag: 'markdown', content: this.panelTitle()}, vertical_align: 'center',
+        icon: {tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '16px 16px'}, icon_position: 'follow_text', icon_expanded_angle: -180},
+      border: {color: 'grey', corner_radius: '5px'}, vertical_spacing: '8px', padding: '8px 8px 8px 8px',
+      elements: [{tag: 'markdown', element_id: 'think', content, text_size: 'notation'}],
+    };
+  }
+
+  /** Live layout when steps is undefined; a final layout otherwise ('' leaves out the panel). */
+  private card(final?: {answer: string; steps: string; truncated: boolean}): Record<string, unknown> {
     const elements: Record<string, unknown>[] = [];
-    if (steps) elements.push({
-      tag: 'collapsible_panel', element_id: 'think_panel', expanded: !final && this.phase === 'thinking',
-      margin: '0px', padding: '4px 0px 4px 0px', vertical_spacing: '4px',
-      header: {title: {tag: 'plain_text', content: this.panelTitle()}, padding: '4px 0px 4px 0px',
-        icon: {tag: 'standard_icon', token: 'down_outlined', color: 'grey'}, icon_position: 'right', icon_expanded_angle: -180},
-      elements: [{tag: 'markdown', element_id: 'think', content: steps, text_size: 'notation'}],
-    });
+    if (!final) elements.push(this.panel(this.thinkContent()));
+    else if (final.steps) elements.push(this.panel(final.steps));
     elements.push({tag: 'markdown', element_id: 'answer',
-      content: final ? (answer?.trim() ? cardMarkdown(answer) : grey('（没有文字回复）')) : this.answerContent()});
-    const note = [this.note, continued ? CONTINUED : undefined].filter(Boolean).join(' ');
+      content: final ? (final.answer.trim() ? cardMarkdown(final.answer) : grey('（没有文字回复）')) : this.answerContent()});
+    const note = [this.note, final?.truncated ? TRUNCATED : undefined].filter(Boolean).join(' ');
     if (final && note) elements.push({tag: 'markdown', element_id: 'note', content: grey(cardMarkdown(note)), text_size: 'notation'});
-    const summary = final ? plainLabel(answer || this.note || '回复', 60) || '回复' : this.answer ? '正在回复…' : '正在思考…';
+    const summary = final ? plainLabel(final.answer || this.note || '回复', 60) || '回复' : this.answer ? '正在回复…' : '正在思考…';
     return {
       schema: '2.0',
       config: {update_multi: true, enable_forward: false, width_mode: 'default', summary: {content: summary}, streaming_mode: !final,
@@ -328,22 +334,38 @@ export class LiveReply {
     };
   }
 
-  private finalCard(): {card: Record<string, unknown>; overflow: string} {
-    const whole = this.card(this.answer);
-    if (bytes(whole) <= CARD_BYTES) return {card: whole, overflow: ''};
-    // Cut between top-level blocks so the card and the rest stay valid Markdown.
-    const blocks = markdownBlocks(this.answer);
-    let low = 1, high = blocks.length - 1, best = 0;
-    while (low <= high) {
-      const middle = (low + high) >> 1;
-      if (bytes(this.card(blocks.slice(0, middle).join(''), true)) <= CARD_BYTES) { best = middle; low = middle + 1; }
-      else high = middle - 1;
+  /** The answer comes first. The folded process only gets the space that is left. */
+  private finalCard(): Record<string, unknown> {
+    // Reserve room for the folded title, so its time and tool count stay visible even beside a long answer.
+    const minimal = this.steps.length ? grey('思考过程较长，卡片里没有显示。') : '';
+    let answer = this.answer, truncated = false;
+    const fits = (candidate: string, steps: string) => bytes(this.card({answer: candidate, steps, truncated})) <= CARD_BYTES;
+    if (!fits(answer, minimal)) {
+      truncated = true;
+      // Cut between top-level blocks so what is shown stays valid Markdown.
+      const blocks = markdownBlocks(this.answer);
+      let low = 1, high = blocks.length - 1, best = 0;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        if (fits(blocks.slice(0, middle).join(''), minimal)) { best = middle; low = middle + 1; }
+        else high = middle - 1;
+      }
+      if (best > 0) answer = blocks.slice(0, best).join('');
+      else {
+        // One oversized block, such as a long code listing: cut it by size.
+        let budget = 20_000;
+        answer = head(this.answer, budget);
+        while (answer && !fits(answer, minimal)) answer = head(this.answer, budget = Math.floor(budget * 0.7));
+      }
     }
-    if (best > 0) return {card: this.card(blocks.slice(0, best).join(''), true), overflow: blocks.slice(best).join('')};
-    // One oversized block, such as a long code listing: cut it by size.
-    let budget = 12_000;
-    let first = head(this.answer, budget);
-    while (first && bytes(this.card(first, true)) > CARD_BYTES) first = head(this.answer, budget = Math.floor(budget * 0.7));
-    return {card: this.card(first, true), overflow: this.answer.slice(first.length)};
+    if (minimal) {
+      let budget = Math.min(FINAL_STEP_BYTES, CARD_BYTES - bytes(this.card({answer, steps: '', truncated})) - 800);
+      while (budget > 300) {
+        const steps = this.stepsMarkdown(budget);
+        if (steps && fits(answer, steps)) return this.card({answer, steps, truncated});
+        budget = Math.floor(budget * 0.7);
+      }
+    }
+    return this.card({answer, steps: minimal, truncated});
   }
 }

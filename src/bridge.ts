@@ -117,7 +117,7 @@ const HELP = `直接把想做的事告诉我就好。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
 const HARNESS_HELP = `
 
-这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复和思考过程会实时显示；需要你确认的操作，我会先发卡片问你。`;
+这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：归档当前会话，下一条消息开启新会话；长期记忆保留
 /sessions：选择以前的对话；/sessions detail 查看完整列表和 ID
@@ -398,12 +398,11 @@ export class BotBridge {
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.config.turnTimeoutMs);
     const harness = message.chatType === 'p2p' && lane.user.directMode === 'harness';
     let live: LiveReply | undefined;
-    // Once a live card exists it carries this turn's outcome; no separate status reply is sent.
+    // Once a live card exists it carries this turn's whole outcome; nothing else is sent as text.
     const conclude = async (final: LiveReplyFinal): Promise<void> => {
       const card = live!;
       live = undefined;
-      const {overflow, confirmed} = await card.finish(final);
-      if (confirmed && overflow.trim()) await this.reply(message, overflow, controller.signal);
+      if (!await card.finish(final)) this.audit({stage: 'live-card-unconfirmed', messageId: message.messageId});
     };
     try {
       await this.ensureSession(message, lane);
