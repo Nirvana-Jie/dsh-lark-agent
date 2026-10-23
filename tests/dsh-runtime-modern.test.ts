@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { MemoryAccess, MemoryEntryLike } from '../src/dsh-runtime.js';
 
 // Optional real-host contract suite. DSH_MODERN_HOST_ROOT is an isolated copy
@@ -13,7 +13,7 @@ const load = (path: string) => import(/* @vite-ignore */ pathToFileURL(join(host
 const hostModule = (name: string) => load(`node_modules/@deepseek-ai/${name}/lib/index.js`);
 
 describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
-  async function createHost(directory: string, blocked = false) {
+  async function createHost(directory: string, blocked = false, chunks?: unknown[]) {
     const [cordis, agents, sessions, prompts, tools, projections, llm, loop, persistence, runtime] = await Promise.all([
       hostModule('cordis'), hostModule('dsh-agent'), hostModule('dsh-session'), hostModule('dsh-system-prompt'),
       hostModule('dsh-tools'), hostModule('dsh-session-projection'), hostModule('dsh-llm'),
@@ -45,6 +45,7 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
           yield {type: 'finish', reason: {kind: 'aborted'}};
           return;
         }
+        if (chunks) { yield* chunks; return; }
         yield {type: 'text-delta', index: 0, text: 'offline answer'};
         yield {type: 'block-end', index: 0, block: {type: 'text', text: 'offline answer'}};
         yield {type: 'finish', reason: {kind: 'completed'}};
@@ -100,6 +101,73 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     } finally {
       for (const host of hosts) await host.close();
       await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  const ownerMemory = (): MemoryAccess => ({privateChat: true, list: async () => [], search: async () => [],
+    remember: async () => { throw new Error('unused'); }, forget: async () => false});
+
+  it('runs a harness channel session with the host prompt, context and tools, and streams real frames', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-modern-harness-'));
+    const host = await createHost(directory, false, [
+      {type: 'reasoning-delta', index: 0, text: 'think first'}, {type: 'block-end', index: 0, block: {type: 'reasoning', text: 'think first'}},
+      {type: 'text-delta', index: 1, text: 'harness answer'}, {type: 'block-end', index: 1, block: {type: 'text', text: 'harness answer'}},
+      {type: 'finish', reason: {kind: 'completed'}},
+    ]);
+    try {
+      host.root.get('tools').register(host.tools.defineTool({name: 'bash', description: 'bash', parameters: {},
+        output: {schema: {type: 'object', additionalProperties: false, properties: {}}, render: () => [{type: 'text', text: 'ok'}]},
+        async execute() { return {}; }}));
+      const session = await host.adapter.create({cwd: '/tmp/lark-modern-owner', allowedTools: [], provider: 'offline', model: 'offline',
+        mode: 'harness', memory: ownerMemory()});
+      const agent = host.root.get('agents').get(session.id);
+      const assembly = await host.root.get('systemPrompt').assemble({scope: agent, agent});
+      const prompt = host.prompts.renderPrompt(assembly);
+      // The owner's own session keeps the host persona and runtime context.
+      expect(prompt).toContain('PRIVATE APP PERSONA');
+      expect(prompt).toContain('飞书私聊');
+      expect(prompt).not.toContain('飞书中的 dsh 团队助手');
+      expect(host.prompts.renderContextSnapshot(assembly)).toContain('PRIVATE APP SNAPSHOT');
+      expect(assembly.tools.map((tool: {name: string}) => tool.name)).toEqual(expect.arrayContaining(['bash', 'lark_memory_list']));
+      const events: unknown[] = [];
+      await expect(session.run('research', new AbortController().signal, undefined, {stream: (event: unknown) => events.push(event)}))
+        .resolves.toEqual({text: 'harness answer', artifacts: [], reasoning: 'think first'});
+      expect(events).toEqual([{type: 'attempt'}, {type: 'reasoning', text: 'think first'}, {type: 'text', text: 'harness answer'}]);
+      await session.dispose();
+    } finally {
+      await host.close(); await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('answers real host approvals and questions only for its own active harness turn', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-modern-relay-'));
+    const host = await createHost(directory, true);
+    try {
+      const session = await host.adapter.create({cwd: '/tmp/lark-modern-owner', allowedTools: [], provider: 'offline', model: 'offline',
+        mode: 'harness', memory: ownerMemory()});
+      const agent = host.root.get('agents').get(session.id);
+      const {scopeTarget} = await hostModule('dsh-scope');
+      const unanswered = async () => 'unavailable';
+      expect(await host.root.waterfall(scopeTarget(host.root, agent), 'approval/request', {agent, toolName: 'bash'}, unanswered)).toBe('unavailable');
+      const approve = vi.fn(async () => true);
+      const ask = vi.fn(async () => [{id: 'go', selected: ['Yes']}]);
+      const controller = new AbortController();
+      const turn = session.run('go', controller.signal, undefined, {approve, ask});
+      await host.started;
+      expect(await host.root.waterfall(scopeTarget(host.root, agent), 'approval/request', {agent, toolName: 'bash', reason: 'outside sandbox'}, unanswered))
+        .toBe('allowed-once');
+      expect(approve).toHaveBeenCalledWith({toolName: 'bash', reason: 'outside sandbox'}, expect.any(AbortSignal));
+      expect(await host.root.waterfall(scopeTarget(host.root, agent), 'user-questions/request',
+        {agent, questions: [{id: 'go', question: 'Proceed?', options: [{label: 'Yes'}, {label: 'No'}]}]}, async () => { throw new Error('no answerer'); }))
+        .toEqual({answers: [{id: 'go', selected: ['Yes']}]});
+      // Another agent's request never reaches this chat.
+      expect(await host.root.waterfall(scopeTarget(host.root, {}), 'approval/request', {}, unanswered)).toBe('unavailable');
+      expect(approve).toHaveBeenCalledOnce();
+      controller.abort();
+      await expect(turn).rejects.toMatchObject({code: 'CANCELLED'});
+      await session.dispose();
+    } finally {
+      await host.close(); await rm(directory, {recursive: true, force: true});
     }
   });
 

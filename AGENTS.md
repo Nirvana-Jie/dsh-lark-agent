@@ -34,6 +34,7 @@
 | 私聊菜单加载与原地更新 | `src/command-feedback.ts`、`src/bridge.ts`、`src/lark-cli.ts` | `command-feedback`、`model-controls-bridge`、`lark-cli` 测试 |
 | 结构化作品、表单、云端图示与报告 | `src/presentation.ts`、`src/artifacts.ts`、`src/artifact-publisher.ts`、`src/rich-scopes.ts` | `presentation`、`artifacts`、`artifact-publisher`、`presentation-flow`；兼容矩阵里的原生展示工具 |
 | Harness 原生作品卡与本地预览 | `src/native-presentation.ts`、`src/dsh-runtime.ts` | `native-presentation`、`dsh-runtime-model-native`；公开交付事件、原生 checkpoint、实际侧栏预览 |
+| Harness 模式私聊：实时卡片、确认与提问、文件交付 | `src/dsh-runtime.ts`、`src/live-reply.ts`、`src/interaction-cards.ts`、`src/bridge.ts` | `dsh-runtime`、`live-reply`、`channel-bridge`、`interaction-cards`；兼容矩阵里的 harness 用例 |
 
 表中简写测试名对应 `tests/<名称>.test.ts` 或 `.test.tsx`；onboarding 行的省略路径均在 `src/onboarding/`。修改接入、打包或运行脚本时，同步中英文 README / DEVELOPMENT.md 中的可复制步骤；修改用户可见行为时，同步中英文 README、DEVELOPMENT.md、基础帮助和模型表达。
 
@@ -44,7 +45,8 @@
 - `configFile` / `DSH_LARK_CONFIG` 有值时加载显式团队配置；留空时注册连接设置。两条入口复用 `createBotService`，保持相同准入、持久化和关闭规则。
 - 控制面只允许宿主所有者访问：旧 RPC 保留 loopback 授权，新 RPC 校验 owner principal。UI 只传协议列出的操作字段，不接受任意配置路径、身份或密钥。
 - 绑定来自未过期配对词对应的真实私聊事件，并匹配创建者或经过本机所有者确认。原生模型检查、连接就绪和飞书确认回复成功后才持久化启用；取消、响应未知、关闭失败时保留可恢复状态。
-- 自动接入仅授权本人私聊，`groupChats: []`、`allowedTools: []`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
+- 自动接入仅授权本人私聊，`groupChats: []`，本人私聊为 Harness 模式（`directMode: 'harness'`）；团队配置默认仍是受限助手，群聊始终受限并使用 `allowedTools`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
+- Harness 模式只用于已验证本人的私聊（运行时对非私聊策略拒绝创建），飞书只是该 Harness 会话的入口：保留宿主人设、运行时上下文、工具、展示模式与权限策略，只追加 `lark-channel` 渠道段。宿主审批和提问由插件按 agent 作用域监听，转成签名卡片发给本人；卡片答复绕过会话队列（运行中的回合正占着它），按 ID 一次有效并校验操作者与聊天，超时、取消或卡片不可用一律拒绝。旧宿主的提问只有全局浏览器提供方，Harness 模式下隐藏 `ask_user_question`，由模型在回复里提问。
 - 双宿主通过公开能力适配。保留 legacy persona/readFrom 与 modern prefix/snapshotEvents/open-read 的分支；现代 required cwd 取自当前 Agent。更新 peer 范围前，在对应真实宿主依赖上验证，不能只改版本字符串或跳过安全能力。
 - 自动接入状态按宿主代际及 home 分目录；原生持久化跟随宿主。跨代迁移需明确验证，不复用旧后台状态或混写原生日志。
 - 项目、仓库与 npm 包名为 `dsh-lark-agent`；插件 ID 与日志前缀 `im-larkbot`、数据目录 `~/.dsh-larkbot/`、RPC 路径 `larkbot`、设置页与样式 ID、应用注册来源、launchd 标签和构建环境变量沿用旧名。改这些运行标识会让已有安装丢失配置、状态或后台服务，或破坏设置页与宿主的契约，须先设计并验证迁移。
@@ -59,15 +61,16 @@
 - 保持群策略键、授权 epoch 与原生历史的隔离，不能把旧群历史导入新的授权范围。`withGroupAccess` 回调只负责发送，不能重入 MemoryStore。
 - 先持久化消息 claim 再执行；原生 checkpoint 成功后才发布会话目录或确认回复。保存结果不确定时拒绝继续访问，不能用空状态掩盖失败。
 - 每个用户／聊天／话题串行，取消只影响所属队列。修改型卡片 nonce 在容量准入后消费；回调继续校验签名、操作者、聊天和当前权限。
-- 保留独立 complete persona、动态上下文抑制、native tools、`restrict` 与单向 `guard`，以及宿主审批拒绝。工作目录不是文件系统沙箱；额外工具必须自身实施资源权限。
-- CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。
+- 受限模式（群聊、团队配置的默认私聊）保留独立 complete persona、动态上下文抑制、native tools、`restrict` 与单向 `guard`，以及宿主审批拒绝；不能把 Harness 模式、思考过程、实时卡片或确认卡片扩展到群聊。工作目录不是文件系统沙箱；额外工具必须自身实施资源权限。
+- CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。实时卡片只有首次回复算发送：卡片实体创建失败才改用普通回复（之后 10 分钟不再尝试）；回复结果未知时继续更新卡片、不另发消息。对同一卡片实体的更新幂等，可用更高的 sequence 重试；长回复余下部分只在终稿卡片确认后续发。
+- Harness 交付的文件只在 realpath 位于该用户工作区内、是非空普通文件且不超过 30 MB 时上传，CLI 只收到以文件所在目录为 cwd 的 `./basename`；其余只告知电脑上的位置，上传结果未知时不重发。
 - 状态锁保护目录，全局机器人租约按 bot 身份跨 home / profile 保护接收实例；配对监听也取得同一租约。关闭时排空处理、原生持久化及进度清理，成功后才释放锁。关闭失败保留服务所有权和租约；持锁进程仍在或无法确认已退出时，禁止接管或删锁。只有确认原持锁进程已退出（PID 不存在、PID 已属于另一进程，或无法核对身份的锁早于本次开机），且机器人租约经专用 profile 的 CLI 确认没有活跃 consumer 时，才原子接管遗留锁；不按锁的年龄猜测，锁目录须在本机磁盘。
 - 原生会话释放与该会话队列串行；释放失败保留 handle 和 lane，确认关闭前不能打开同一原生日志。闲置回收也遵守此规则。
 - 结构化展示只接受受限数据，经当前原生回合 checkpoint 后保存不可变作品；模型不能指定文件路径、卡片 JSON、收件人或权限。表单依据保存的 schema 校验，按原用户／聊天／逻辑话题绑定，提交一次后不可重放。
 - 本地作品与飞书使用同一份声明式数据。现代宿主通过公开 `deliverables/presented` 事件展示，事件随原生 checkpoint 保存；仅写入所属工作区下固定 `.dsh-lark-results/<nativeSessionId>/` 目录，拒绝符号链接和被修改的快照。模板 HTML 不执行模型脚本，不加载外部资源。旧宿主没有等价接口时不伪造 UI 能力。
 - 云端作品仅在本人私聊发布：先创建无私人标题的空文档，收紧并回读 ACL 后写内容，再仅授予已验证本人阅读。回看前复核权限；创建结果未知保留状态不重建。使用原子接口，避免 `docs +create` 对 CLI 默认用户的自动授权副作用。群图示和报告保留在聊天内，不能通过展示功能绕过群记忆 epoch。
 - ACL 回读区分应用 `appid` 与人员 `openid`，仅接受专用 profile 对应应用及已验证本人；成员查询显式请求 `fields=type`。已知文档 ID 的失败任务须验证私有 ACL，且原文档为空或所有受控内容完全匹配；图示另核对源码、节点标签和连接。复用已完成步骤，不覆盖手动编辑，不对未知创建自动重试。
-- 文档与画板为默认能力，新应用首次注册就申请所需 bot scopes。旧应用缺少权限时通过 owner-only 设置操作补充授权；取消此流程不停止聊天或重新绑定用户，不要求已授权的用户再次扫码。完整 HTML 执行、任意文件交付和群云文档分享不属于当前能力，扩展前需独立设计授权及隔离。
+- 文档、画板与实时回复（`cardkit:card:write`）为默认能力，新应用首次注册就申请所需 bot scopes。旧应用缺少权限时通过 owner-only 设置操作补充授权；取消此流程不停止聊天或重新绑定用户，不要求已授权的用户再次扫码。完整 HTML 执行、工作区外或群聊中的文件交付和群云文档分享不属于当前能力，扩展前需独立设计授权及隔离。
 - 现代宿主明确报告目标 `SessionAlreadyOwnedError` 时，仅本人私聊可从原始持久化只读快照用官方 `buildForkSeed` 续聊；校验来源 ID/cwd 并重新安装完整飞书权限。新原生历史 checkpoint 后，CAS 重绑原话题的 nativeId。保留父会话；群聊、其他错误或不完整证据继续拒绝恢复。
 
 ## 文档与产物治理

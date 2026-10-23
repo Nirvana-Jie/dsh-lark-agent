@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { registerApp as sdkRegisterApp } from '@larksuiteoapi/node-sdk';
 import {BOT_MENU_EVENT} from '../bot-menu.js';
-import {DOCUMENT_SCOPES, documentScopesReady} from '../rich-scopes.js';
+import {DOCUMENT_SCOPES, STREAMING_SCOPE, defaultScopesReady} from '../rich-scopes.js';
 
 // The SDK exports registerApp but not the named option/result interfaces in 1.76.0.
 type RegisterAppOptions = Parameters<typeof sdkRegisterApp>[0];
@@ -195,7 +195,7 @@ export class LarkPlatform {
         appPreset: {name: request.name, desc: request.description ?? '在飞书中与 dsh 个人助手对话'},
         addons: {
           preset: false,
-          scopes: {tenant: [...new Set([...BOT_SCOPES, ...SETUP_SCOPES, ...DOCUMENT_SCOPES, ...(request.cardInteractions ? [CARD_SCOPE] : []),
+          scopes: {tenant: [...new Set([...BOT_SCOPES, ...SETUP_SCOPES, ...DOCUMENT_SCOPES, STREAMING_SCOPE, ...(request.cardInteractions ? [CARD_SCOPE] : []),
             ...(request.loadingReaction ? [REACTION_SCOPE] : [])])]},
           events: {items: {tenant: ['im.message.receive_v1', BOT_MENU_EVENT]}},
           ...(request.cardInteractions ? {callbacks: {items: ['card.action.trigger']}} : {}),
@@ -238,9 +238,9 @@ export class LarkPlatform {
       const current = await this.inspect(profile, signal);
       if (current.appId !== selected.appId) fail('APP_MISMATCH');
       // Another host may already have completed the upgrade; never ask for another scan just to refresh UI state.
-      if (current.scopeStatus === 'verified' && documentScopesReady(current.grantedScopes)) return;
+      if (current.scopeStatus === 'verified' && defaultScopesReady(current.grantedScopes)) return;
       const result = await this.registrar({source: 'dsh-larkbot', appId: selected.appId, signal,
-        addons: {preset: false, scopes: {tenant: [...DOCUMENT_SCOPES]}},
+        addons: {preset: false, scopes: {tenant: [...DOCUMENT_SCOPES, STREAMING_SCOPE]}},
         onQRCodeReady: info => {
           checkSignal(signal);
           let url: URL; try {url = new URL(info.url);} catch {return fail('INVALID_RESPONSE');}
@@ -253,7 +253,7 @@ export class LarkPlatform {
       checkSignal(signal);
       if (result.client_id !== selected.appId || (result.user_info?.tenant_brand && result.user_info.tenant_brand !== selected.brand)) fail('APP_MISMATCH');
       const inspection = await this.inspect(profile, signal);
-      if (inspection.appId !== selected.appId || inspection.scopeStatus !== 'verified' || !documentScopesReady(inspection.grantedScopes)) fail('MISSING_SCOPE');
+      if (inspection.appId !== selected.appId || inspection.scopeStatus !== 'verified' || !defaultScopesReady(inspection.grantedScopes)) fail('MISSING_SCOPE');
     } catch (error) {checkSignal(signal); if (error instanceof LarkPlatformError) throw error; fail('REGISTRATION_FAILED');}
   }
 

@@ -26,14 +26,17 @@
 
 ## 能力与上限
 
-- **回复：** 非流式，需要结构时用富文本或卡片；会话与偏好重启后可恢复；处理中在原消息上加 `Typing` 表情（扫码新建连接默认开启，复用机器人需已有表情权限）。模型和思考深度按本人与当前话题保存，重启后保留，只影响后续回复，不改宿主全局默认。引用回复某条消息仍接着当前对话；飞书话题（thread）单独保存会话。
+- **本人私聊就是 Harness：** 扫码接入的本人私聊是一个普通 Harness 会话的入口，沿用电脑上 Harness 的系统提示词、运行时上下文、全部工具和权限模式，只追加一段飞书渠道说明；能联网、读写文件还是执行命令，都由电脑上的权限模式决定。单轮处理默认最长 15 分钟。
+- **回复：** 回复、思考过程和工具进度实时显示在同一张卡片里，思考过程在开始回答后自动收起；卡片放不下的长回复分条续发。没有实时回复权限（见下方「默认权限」）或卡片创建失败时，10 分钟内改用普通回复，处理中在原消息上加 `Typing` 表情（扫码新建连接默认开启，复用机器人需已有表情权限）。会话与偏好重启后可恢复。模型和思考深度按本人与当前话题保存，重启后保留，只影响后续回复，不改宿主全局默认。引用回复某条消息仍接着当前对话；飞书话题（thread）单独保存会话。
+- **确认与提问：** Harness 需要确认的操作（如沙箱外的命令）会在私聊发确认卡片：「允许一次」只放行这一次，「拒绝」或 5 分钟内没有确认都不执行；卡片交互未开启时一律拒绝。Harness 提问时发选项卡片（一个不超过 6 项的单选题用按钮，其余用表单），10 分钟没有回答就按未回答继续；dsh CLI / Web `0.1.1-rc.2` 不支持按会话应答提问，改由模型在回复里直接问。卡片按钮只认原用户在原私聊点击，一次有效。
+- **文件：** Harness 用交付工具（如 `present`）交出的文件，如果在本人私聊的工作区内且不超过 30 MB，会直接发到私聊（不超过 10 MB 的图片按图片发送）；工作区外、空文件或发送结果未确认的，只告知它在电脑上的位置。
 - **图表：** 柱状、折线、饼图；最多 4 个系列、24 行，饼图仅单系列。用你提供或已核实的数据，示例数据会标明。
 - **表单：** 普通输入与单选，最多 5 项；仅原用户在原聊天、原话题提交一次，提交内容作为回答续聊；按钮 24 小时有效，卡片交互未就绪时改为文字提问。
 - **图示与报告：** 只授予本人阅读的飞书文档与画板。图示可用时附预览图，最多 16 个节点、24 条连线；报告最多 20 节。网页代码只给文字或代码说明，不执行脚本，不提供公网交互页面。
-- **群里：** 需在[配置文件模式](#两种运行方式)按人授权；云端作品只在本人私聊生成，群里的图表和表单只用该群获准的上下文，图示和报告保留为聊天内文字，不创建群共享文件。
+- **群里：** 需在[配置文件模式](#两种运行方式)按人授权。群聊始终是受限助手：独立人设、工具白名单（`allowedTools`）、需要确认的操作一律拒绝，不实时显示、不显示思考过程。云端作品只在本人私聊生成，群里的图表和表单只用该群获准的上下文，图示和报告保留为聊天内文字，不创建群共享文件。
 - **作品：** 每轮最多 2 个，每人最多 300 个；随会话保存，重启后仍在，换话题后先 `/resume`；`/results` 只列各作品最新版，最多 8 项。修改保留旧版，云端另建新文档、不改写已生成的。作品保存失败（如达到上限）时正文照常发出，作品改用文字展示并注明原因。
 - **本地作品卡：** App `0.2.1-rc.2` 打开对应的飞书会话时显示，可预览图表、图示和报告；dsh CLI / Web `0.1.1-rc.2` 只在飞书展示。图表可展开「查看数据」，图示可展开「查看节点与连接」；表单仍在飞书提交。
-- **文档与画板权限：** 新建机器人扫码时一并申请。旧机器人缺权限时点设置页「补充默认权限」扫码更新原应用，无需重建、重新配对或填 Secret，聊天不中断；需企业审批时，获批后点授权提示中的「重试授权」，不必再扫码。补齐前作品存在本地，之后点原卡片「生成飞书文档」/「生成飞书画板」或发 `/publish <ID>`。
+- **默认权限：** 实时回复（`cardkit:card:write`）、文档与画板权限在新建机器人扫码时一并申请。旧机器人缺权限时点设置页「补充默认权限」扫码更新原应用，无需重建、重新配对或填 Secret，聊天不中断；需企业审批时，获批后点授权提示中的「重试授权」，不必再扫码。补齐后实时回复在 10 分钟内自动启用；补齐前作品存在本地，之后点原卡片「生成飞书文档」/「生成飞书画板」或发 `/publish <ID>`。
 
 <details>
 <summary>卡片预览</summary>
@@ -72,10 +75,11 @@
 | 本人获准的群聊 | 本人明确共享的个人条目 + 当前群 / 话题记忆 | 仅本人在当前群 / 话题的历史 |
 | 其他用户 | 无权读取、恢复或删除你的资料 | 与你的会话隔离 |
 
+- **本人私聊的权限：** 私聊里的助手就是电脑上的 Harness，权限上限是电脑上 Harness 的权限模式；设成完全访问时，在飞书发一句话就能执行命令，请按需设置。确认和提问卡片只发给已绑定的本人，按钮校验操作者、聊天并且一次有效。工作区是专用目录，但不是文件系统沙箱。思考过程和工具进度只显示在本人私聊。
 - **群共享：** 由本人在私聊用 `/memory share` 逐条授权，之后可用于本人所有获准的群会话，群回复全员可见；群模型不自动写入长期记忆。共享、撤销或删除已共享条目会轮换授权：旧群历史不再恢复，旧授权下未发出的回复丢弃，已发出的无法撤回。
 - **数据在哪里：** 通道状态、记忆和本地作品存在运行 Harness 的电脑（默认 `~/.dsh-larkbot/`，完整目录见[备份清单](#备份升级与迁移)），原生会话日志由宿主保存。目录 0700、文件 0600，**并非加密**；`/forget` 与 `/new` 不会安全擦除历史、日志或备份。消息经过飞书和模型服务商，云端文档与画板存于飞书。
 - **投递：** 消息先持久化去重再处理，宿主崩溃或结果未知时可能没有回复；为免重复执行，发送、工具执行和云端创建不自动重放，不保证每条消息恰好处理一次。需要时先确认上次操作是否生效再重发。
-- **不提供：** 以你个人飞书身份操作、任意飞书业务操作、附件理解、流式卡片、定时工作流、完整 HTML 执行、群内云文档分享、多副本部署。
+- **不提供：** 以你个人飞书身份操作、任意飞书业务操作、附件理解、群聊中的 Harness 工具与确认、定时工作流、完整 HTML 执行、工作区外或群内的文件交付、群内云文档分享、多副本部署。
 
 ## 升级
 
@@ -165,7 +169,8 @@ App 路由契约（[client-modern-host](tests/client-modern-host.test.tsx) 测�
 - Secret 经 stdin 交给专用 CLI profile（`dsh-<随机>`），不出现在设置页、浏览器、日志或 `connection.json`。
 - 配对只认配对词（`DSH-…`，10 分钟有效）所在真实私聊事件的发送者，且须是应用创建者（新建即扫码账号，复用时取应用所有者 / 创建者；识别不到时由本机所有者确认）；随后以测试回合验证宿主模型与存储并启动长连接（最多等 45 秒）。
 - 复用已有机器人只检查、不扩权：有 `im:message:readonly` 且卡片回调预检通过才启用按钮，有 `im:message.reactions:write_only` 才启用处理中反馈；缺项按提示到飞书后台补齐。
-- 「扫码创建并连接」总会申请 `im:message:readonly`、`im:message.reactions:write_only` 与文档、画板权限，并注册 `card.action.trigger` 回调；清单见 [src/rich-scopes.ts](src/rich-scopes.ts)。
+- 「扫码创建并连接」总会申请 `im:message:readonly`、`im:message.reactions:write_only`、实时回复（`cardkit:card:write`）与文档、画板权限，并注册 `card.action.trigger` 回调；清单见 [src/rich-scopes.ts](src/rich-scopes.ts)。
+- 扫码接入的本人私聊固定为 Harness 模式（`directMode: "harness"`，单轮最长 15 分钟）并开启实时回复卡片；见[能力与上限](#能力与上限)。
 
 ## 作品展示与云端发布
 
@@ -202,6 +207,7 @@ lark-cli config init --new --name dsh-team-bot   # 保留 --name：省略或同�
 | 文字收发（必需） | `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`；事件 `im.message.receive_v1` | — | `[im-larkbot] ready` |
 | 卡片按钮（`/sessions`、模型选择、表单、发布作品；静态卡片不需要） | `im:message:readonly`；回调 `card.action.trigger` | `cardInteractions: true` | `[im-larkbot] cards ready` |
 | 处理中表情 | `im:message.reactions:write_only` 或覆盖表情操作的权限 | `loadingReaction: true` | `Typing` 出现并在结束后清理；故障或崩溃可能残留 |
+| 实时回复（Harness 模式私聊） | `cardkit:card:write` | `streamingCards: true` | 回复卡片实时更新；缺权限时自动改用普通回复 |
 | 文档与画板 | `application:application:self_manage`、`docx:document:create`、`docx:document:write_only`、`docx:document:readonly`、`docs:permission.setting:write_only`、`docs:permission.setting:read`、`docs:permission.member:create`、`docs:permission.member:retrieve`；画板另需 `board:whiteboard:node:create`、`board:whiteboard:node:read`、`im:resource:upload` | — | 每次发布前实时预检 |
 | 私聊底部菜单 | 事件 `application.bot.menu_v6`；后台步骤与预检见[私聊底部菜单](#私聊底部菜单) | `botMenu: true` | `[im-larkbot] menu ready` |
 
@@ -245,14 +251,15 @@ export DSH_TELEMETRY_DISABLED=1
 - **准入：** `users` 为 1–1000 人的显式名单，`openId` 不可重复。`direct: true` 开私聊（默认 `false`）；`groupChats` 默认为空，填入 `oc_…` 开群，同群每人单独授权。机器人须先入群，群消息须真正 @ 本机器人。
 - **路径：** `cwd` 为该用户工作目录的绝对路径；`stateDir` 相对团队 JSON 所在目录解析，本例为 `.runtime/.state/`。
 - **工具：** 从 `allowedTools: []` 开始，内置记忆与结构化展示工具自动注册；额外工具只接受精确名称，拒绝通配符和 `run_code`。
+- **私聊模式：** `directMode` 默认 `"restricted"`（与群聊相同的受限助手）。设为 `"harness"` 时，该用户的私聊沿用宿主的提示词、全部工具和权限模式，确认与提问发卡片给本人（需 `cardInteractions: true`），`allowedTools` 只用于其群聊；宿主的权限模式即该用户的权限上限，只给可以操作这台电脑的人开启。
 
 | 可选配置 | 默认 | 说明 |
 | --- | --- | --- |
 | `provider` / `model` | 宿主保存的默认模型 | 初始路由；用户用 `/model` 保存的选择优先 |
 | `executable` | `lark-cli` | Lark CLI 路径，按服务进程的 `PATH` 解析，不搜索常见安装目录；插件配置的 `executable` 在此模式不生效 |
 | `responseMode` | `auto` | `text` 关闭卡片，仅用于纯文字兼容排查，此时 `/model`、`/thinking` 只显示当前设置 |
-| `cardInteractions` / `loadingReaction` / `botMenu` | `false` | 开启条件见能力表 |
-| `turnTimeoutMs` / `idleTimeoutMs` | 120 秒 / 30 分钟 | 单轮处理超时 / 闲置后释放 Agent |
+| `cardInteractions` / `loadingReaction` / `botMenu` / `streamingCards` | `false` | 开启条件见能力表 |
+| `turnTimeoutMs` / `idleTimeoutMs` | 120 秒（有 Harness 模式用户时 15 分钟）/ 30 分钟 | 单轮处理超时 / 闲置后释放 Agent |
 | `maxSessions` / `maxSessionsPerUser` | 100 / 10 | 内存会话总数 / 每用户 |
 | `maxPending` / `maxPendingPerSession` | 100 / 5 | 排队消息总数 / 每会话 |
 | `maxInputChars` / `maxOutputChars` / `chunkBytes` | 16000 / 32000 / 4000 | 输入、输出字符数；文字分片的 UTF-8 字节数 |
@@ -298,7 +305,7 @@ dsh --profile feishu-team
 ## 运行边界
 
 - **私聊加载卡：** 模型、思考深度和话题操作超过约 200 毫秒时先显示加载卡，经[卡片更新接口](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/patch)原地更新，未保存或未就绪时不显示成功；模型目录缓存 30 秒并合并并发读取，实际切换仍实时校验。
-- **工具：** `cwd`、profile 和 `allowedTools` 都不是 OS 沙箱，额外工具须自行校验调用者和资源权限。不互信的成员需要编程或文件工具时，用独立 OS 身份或容器执行器并按用户绑定业务凭据；不加载会向 Agent 注入私人上下文的未审核插件。
+- **工具：** `cwd`、profile 和 `allowedTools` 都不是 OS 沙箱，额外工具须自行校验调用者和资源权限；Harness 模式私聊的边界是宿主自己的权限模式与沙箱。不互信的成员需要编程或文件工具时，用独立 OS 身份或容器执行器并按用户绑定业务凭据；不加载会向 Agent 注入私人上下文的未审核插件。
 - **投递与不提供的能力：** 见[隐私与边界](#隐私与边界)。
 
 ## 备份、升级与迁移
@@ -336,6 +343,9 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm pack
 | 有 `ready` 但不回复 | 应用已发布、用户在可用范围 → `openId` 与 `direct` / `groupChats` 准入、群内真正 @ → 模型凭据；未授权用户与非文本消息静默忽略 |
 | 提示文档权限尚未就绪 | 「检查连接」不重查文档权限 → 按[能力与上限](#能力与上限)的「文档与画板权限」补齐，或暂停后恢复；配置文件模式按[能力表](#1-安装依赖并创建飞书应用)开通并发布 |
 | 「上次发布结果尚未确认」 | 创建结果未知且无文档 ID，本地内容保留 → 在宿主机器查 `[im-larkbot]` 日志与状态目录的 `artifacts.json`（权限收紧并写入前新文档只归机器人，本人通常看不到）→ 插件不自动重建；需要时请助手修改该作品，新版本发布时另建文档 |
+| 私聊回复没有实时显示 | 设置页「实时回复、文档与画板」已启用，否则点「补充默认权限」，补齐后 10 分钟内生效 → 配置文件模式需 `directMode: "harness"`、`streamingCards: true` 并开通 `cardkit:card:write` → `responseMode` 不是 `text` |
+| 需要确认的操作总被拒绝，或没有确认卡片 | 卡片按钮可用（见下一行）→ 5 分钟内点「允许一次」→ 群聊不支持确认 → 想少弹确认，在电脑上调整 Harness 的权限模式 |
+| 文件没有发到飞书 | 文件在本人私聊的工作区内、不超过 30 MB 且不是空文件 → 机器人有 `im:resource:upload` → 回复里会说明未发送的原因和电脑上的位置 |
 | 按钮无响应 | `im:message:readonly` 已授权 → `card.action.trigger` 回调已配置并发布 → 卡片预检 → `cards ready` → 重新发 `/sessions` 取新卡片（按钮 24 小时有效，修改型按钮只能用一次，切换宿主后需新卡片） |
 | 底部菜单不显示或点击无响应 | 客户端 ≥ 7.22、悬浮样式、版本已发布约 5 分钟（群聊不显示）→ `application.bot.menu_v6` 已订阅、事件标识为 `dsh.new`、`dsh.sessions`、`dsh.model`、`dsh.thinking` → 菜单预检通过 → 扫码接入暂停后恢复，或 `botMenu: true` 后重启见 `menu ready` → 用户 `direct: true` 且先发过一句普通消息 |
 | 「当前对话正由客户端使用」 | App 占用同一原生会话且无法自动续聊（群聊，或宿主缺只读快照续聊接口）→ 在 App 关闭该会话后重试。现代宿主下本人私聊遇明确占用时不提示，改从已保存的只读快照另起续聊：保留话题名和模型选择，重装飞书权限与记忆范围，App 原会话不受影响，之后各自发展 |

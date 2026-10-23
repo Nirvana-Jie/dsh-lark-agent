@@ -26,7 +26,7 @@ interface ActionPayload {
 const TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TOKEN_LENGTH = 3000;
 const HEX_ID = /^[a-f0-9]{12}$/;
-const COMMAND = /^(?:\/(?:help|status|sessions|memory|new|model|thinking|results)|\/(?:model|thinking) (?:use [a-f0-9]{16}|page [0-9]{1,4})|\/memory (?:global|chat|show [a-f0-9]{12})|\/(?:resume|forget|result|publish|answer) [a-f0-9]{12})$/;
+const COMMAND = /^(?:\/(?:help|status|sessions|memory|new|model|thinking|results)|\/(?:model|thinking) (?:use [a-f0-9]{16}|page [0-9]{1,4})|\/memory (?:global|chat|show [a-f0-9]{12})|\/(?:resume|forget|result|publish|answer|approve|deny|reply) [a-f0-9]{12}|\/choose [a-f0-9]{12} [0-9]{1,2})$/;
 const PAYLOAD_KEYS = ['version', 'namespace', 'issuedAt', 'expiresAt', 'nonce', 'binding'];
 const BINDING_KEYS = ['ownerId', 'chatId', 'chatType', 'threadId', 'sourceMessageId', 'command', 'expectedSessionId', 'expectedModelRevision'];
 

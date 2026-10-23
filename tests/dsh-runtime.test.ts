@@ -3,7 +3,7 @@ import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from 
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools';
 import { describe, expect, it, vi } from 'vitest';
-import { DshRuntime, DshRuntimeError, checkRuntimeCompatibility, type AgentPolicy, type MemoryAccess, type MemoryEntryLike, type ModelSelection } from '../src/dsh-runtime.js';
+import { DshRuntime, DshRuntimeError, checkRuntimeCompatibility, type AgentPolicy, type ApprovalPrompt, type MemoryAccess, type MemoryEntryLike, type ModelSelection, type UserQuestion } from '../src/dsh-runtime.js';
 
 const basePolicy: AgentPolicy = { cwd: '/tmp/dsh-lark-test', allowedTools: [] };
 
@@ -1042,5 +1042,177 @@ describe('DshRuntime', () => {
       await toolsPlugin.dispose();
       await promptPlugin.dispose();
     }
+  });
+});
+
+describe('harness channel mode', () => {
+  const ownerMemory = (privateChat = true): MemoryAccess => ({privateChat, list: vi.fn(async () => []), search: vi.fn(async () => []),
+    remember: vi.fn(async () => { throw new Error('unused'); }), forget: vi.fn(async () => false)});
+  const harnessPolicy = (): AgentPolicy => ({...basePolicy, mode: 'harness', memory: ownerMemory()});
+  type Listener = (...args: any[]) => any;
+  const listener = (f: ReturnType<typeof fixture>, name: string): Listener => {
+    const entry = f.scopedOn.mock.calls.find(([event]) => event === name);
+    if (!entry) throw new Error(`Expected a scoped ${name} listener`);
+    return entry[1] as Listener;
+  };
+  const toolCall = (id: string, name: string, args: string, turn = 1, step = 1) => ({type: 'assistant/chunk', data: {turn, step,
+    chunk: {type: 'block-end', index: 0, block: {type: 'tool-call', id, name, arguments: args}}}});
+
+  it('keeps the host prompt, tools and presentation mode and adds only a channel section', async () => {
+    const f = fixture();
+    await f.runtime.create(harnessPolicy());
+    expect(f.prompt.suppressRuntimeContext).not.toHaveBeenCalled();
+    expect(f.tools.presentAs).not.toHaveBeenCalled();
+    expect(f.tools.guard).not.toHaveBeenCalled();
+    // A legacy host would send questions to its one browser provider.
+    expect(f.tools.restrict).toHaveBeenCalledExactlyOnceWith({deny: ['ask_user_question']});
+    expect(f.prompt.section).toHaveBeenCalledTimes(1);
+    const section = f.prompt.section.mock.calls[0]![0] as Record<string, unknown>;
+    expect(section).toMatchObject({name: 'lark-channel', order: 15_000});
+    expect(section).not.toHaveProperty('complete');
+    expect(section.text).toEqual(expect.stringContaining('飞书私聊'));
+    expect(section.text).toEqual(expect.stringContaining('{{lark_memory}}'));
+    expect(section.text).toEqual(expect.stringContaining('{{lark_model}}'));
+    expect(f.tools.register.mock.calls.map(([definition]) => (definition as {name: string}).name)).toEqual(
+      ['lark_memory_list', 'lark_memory_search', 'lark_memory_remember', 'lark_memory_forget']);
+    expect(f.scopedOn.mock.calls.map(([event]) => event)).toEqual(expect.arrayContaining(['approval/request', 'agent/assistant-stream', 'tools/result']));
+    expect(f.scopedOn.mock.calls.map(([event]) => event)).not.toContain('user-questions/request');
+  });
+
+  it('answers questions itself on a modern host instead of hiding the tool', async () => {
+    const f = fixture();
+    Object.assign(f.prompt, {getSectionOrder: vi.fn(() => 100)});
+    await f.runtime.create(harnessPolicy());
+    expect(f.tools.restrict).not.toHaveBeenCalled();
+    expect(f.scopedOn.mock.calls.map(([event]) => event)).toContain('user-questions/request');
+  });
+
+  it('refuses harness mode outside a verified private chat', async () => {
+    const f = fixture();
+    await expect(f.runtime.create({...basePolicy, mode: 'harness'})).rejects.toMatchObject({code: 'SETUP_FAILED'});
+    await expect(f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory(false)})).rejects.toMatchObject({code: 'SETUP_FAILED'});
+    expect(f.create).not.toHaveBeenCalled();
+  });
+
+  it('relays an approval for its own turn with the exact call arguments', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const relay = listener(f, 'approval/request');
+    const next = vi.fn(async () => 'unavailable');
+    // Outside a turn this channel owns nothing to ask about.
+    await expect(relay({toolName: 'bash'}, next)).resolves.toBe('unavailable');
+    expect(next).toHaveBeenCalledTimes(1);
+    const outcomes: unknown[] = [];
+    const approve = vi.fn(async (_prompt: ApprovalPrompt, _signal: AbortSignal) => true);
+    f.agent.followup.mockImplementation(() => f.emit(toolCall('call_1', 'bash', '{"command":"rm -rf build"}')));
+    f.agent.whenIdle.mockImplementationOnce(async () => {
+      outcomes.push(await relay({toolName: 'bash', callId: 'call_1', reason: 'Writes outside the sandbox'}, next));
+      approve.mockResolvedValueOnce(false);
+      outcomes.push(await relay({toolName: 'bash', callId: 'call_1'}, next));
+      approve.mockRejectedValueOnce(new Error('card failed'));
+      outcomes.push(await relay({toolName: 'bash'}, next));
+      const aborted = new AbortController();
+      aborted.abort();
+      approve.mockRejectedValueOnce(new Error('withdrawn'));
+      outcomes.push(await relay({toolName: 'bash', signal: aborted.signal}, next));
+    });
+    await session.run('clean up', new AbortController().signal, undefined, {approve});
+    expect(outcomes).toEqual(['allowed-once', 'rejected', 'unavailable', 'cancelled']);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(approve.mock.calls[0]![0]).toEqual({toolName: 'bash', reason: 'Writes outside the sandbox',
+      detail: '{\n  "command": "rm -rf build"\n}'});
+  });
+
+  it('streams reasoning, text and tool progress from legacy chunks', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const events: unknown[] = [];
+    f.agent.followup.mockImplementation(() => {
+      f.emit({type: 'assistant/chunk', data: {turn: 1, step: 1, chunk: {type: 'reasoning-delta', index: 0, text: 'think'}}});
+      f.emit(toolCall('call_1', 'web_search', '{"queries":["Lody","LodyAI"]}'));
+      // Another session's chunks never reach this turn.
+      f.emit({type: 'assistant/chunk', data: {turn: 1, step: 1, chunk: {type: 'text-delta', index: 1, text: 'foreign'}}}, {id: f.session.id} as Session);
+      listener(f, 'tools/result')({callId: 'call_1'}, {isError: false});
+      f.emit({type: 'assistant/chunk', data: {turn: 1, step: 2, chunk: {type: 'text-delta', index: 0, text: 'answer'}}});
+      f.text('answer');
+    });
+    await expect(session.run('research', new AbortController().signal, undefined, {stream: event => events.push(event)})).resolves.toBe('answer');
+    expect(events).toEqual([
+      {type: 'attempt'}, {type: 'reasoning', text: 'think'},
+      {type: 'tool', callId: 'call_1', name: 'web_search', detail: 'Lody、LodyAI'},
+      {type: 'tool-done', callId: 'call_1', ok: true},
+      {type: 'attempt'}, {type: 'text', text: 'answer'},
+    ]);
+  });
+
+  it('streams modern frames once and discards attempts that will not be part of the answer', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const frames = listener(f, 'agent/assistant-stream');
+    const events: unknown[] = [];
+    const chunk = (text: string) => ({type: 'chunk', chunk: {type: 'text-delta', index: 0, text}});
+    f.agent.followup.mockImplementation(() => {
+      frames({agent: f.agent, frame: {type: 'start', turn: 1, step: 1}});
+      frames({agent: f.agent, frame: chunk('draft')});
+      frames({agent: f.agent, frame: {type: 'end', outcome: {kind: 'committed', eventType: 'assistant/attempt', seq: 3}}});
+      frames({agent: {session: {}}, frame: chunk('other agent')});
+      // A host that also logged raw chunks must not show the same text twice.
+      f.emit({type: 'assistant/chunk', data: {turn: 1, step: 1, chunk: {type: 'text-delta', index: 0, text: 'duplicate'}}});
+      frames({agent: f.agent, frame: {type: 'start', turn: 1, step: 1}});
+      frames({agent: f.agent, frame: chunk('final')});
+      frames({agent: f.agent, frame: {type: 'end', outcome: {kind: 'committed', eventType: 'assistant/message', seq: 4}}});
+      f.text('final');
+    });
+    await session.run('question', new AbortController().signal, undefined, {stream: event => events.push(event)});
+    expect(events).toEqual([{type: 'attempt'}, {type: 'text', text: 'draft'}, {type: 'discard'},
+      {type: 'attempt'}, {type: 'text', text: 'final'}]);
+  });
+
+  it('keeps streaming failures out of the turn', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    f.agent.followup.mockImplementation(() => {
+      f.emit({type: 'assistant/chunk', data: {turn: 1, step: 1, chunk: {type: 'text-delta', index: 0, text: 'ok'}}});
+      f.text('ok');
+    });
+    await expect(session.run('question', new AbortController().signal, undefined, {stream: () => { throw new Error('card down'); }}))
+      .resolves.toBe('ok');
+  });
+
+  it('returns reasoning apart from the answer and resolves host-presented files against the workspace', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    f.agent.followup.mockImplementation(() => {
+      f.emit({type: 'assistant/message', data: {message: {content: [{type: 'reasoning', text: 'why'}, {type: 'text', text: 'done'}]}}});
+      f.emit({type: 'deliverables/presented', data: {turn: 1, callId: 'call_9', files: [
+        {path: 'out/report.pdf', description: 'Weekly report'}, {path: '/elsewhere/chart.png'},
+        {path: 'out/report.pdf', description: 'duplicate'}, {path: 7}, {path: 'bad\0path'},
+      ]}});
+    });
+    await expect(session.run('make a report', new AbortController().signal)).resolves.toEqual({
+      text: 'done', artifacts: [], reasoning: 'why',
+      files: [{path: '/tmp/dsh-lark-test/out/report.pdf', description: 'Weekly report'}, {path: '/elsewhere/chart.png', description: ''}],
+    });
+  });
+
+  it('relays a modern question with validated options and answers with the original labels', async () => {
+    const f = fixture();
+    Object.assign(f.prompt, {getSectionOrder: vi.fn(() => 100)});
+    const session = await f.runtime.create(harnessPolicy());
+    const relay = listener(f, 'user-questions/request');
+    const next = vi.fn(async () => ({answers: []}));
+    const ask = vi.fn(async (_questions: UserQuestion[], _signal: AbortSignal) => [{id: 'mode', selected: ['Fast (Recommended)']}]);
+    const results: unknown[] = [];
+    f.agent.whenIdle.mockImplementationOnce(async () => {
+      results.push(await relay({questions: [{id: 'mode', question: 'Which mode?', header: 'Mode',
+        options: [{label: 'Fast (Recommended)', description: 'Fewer checks'}, {label: 'Careful'}]}]}, next));
+      // Malformed requests stay with the host's other answerers.
+      results.push(await relay({questions: [{id: 'x', question: 'Pick', options: [{label: 'a'}, {label: 'a'}]}]}, next));
+    });
+    await session.run('start', new AbortController().signal, undefined, {ask});
+    expect(ask.mock.calls[0]![0]).toEqual([{id: 'mode', question: 'Which mode?', header: 'Mode', multiSelect: false,
+      options: [{label: 'Fast (Recommended)', description: 'Fewer checks'}, {label: 'Careful'}]}]);
+    expect(results).toEqual([{answers: [{id: 'mode', selected: ['Fast (Recommended)']}]}, {answers: []}]);
+    expect(next).toHaveBeenCalledTimes(1);
   });
 });

@@ -137,11 +137,11 @@ export function ConnectionCard({api}: ConnectionCardProps) {
       <div className="lark-actions lark-center">{phase === 'paused' ? <button className="lark-primary" disabled={unavailable} onClick={() => void mutate('resume')}>恢复连接</button> : <>
         {snapshot.bot && <External className="lark-primary" url={snapshot.bot.url}>去飞书聊天</External>}<button className="lark-secondary" disabled={unavailable} onClick={() => void mutate('pause')}>暂停连接</button></>}</div>
       <div className="lark-connected-row"><div><strong>{snapshot.bot?.name || '我的飞书助手'}</strong><p>{phase === 'paused' ? '连接已暂停' : '已确认本人 · 私聊已就绪'}</p></div><button className="lark-text-button" disabled={disabled} onClick={() => void mutate('recheck')}>检查连接</button></div>
-      <div className="lark-connected-row"><div><strong>文档与画板</strong><p>{snapshot.capabilities.documents ? '已启用 · 私聊作品仅供本人查看' : '把复杂方案整理成可打开的文档和图示'}</p></div>
+      <div className="lark-connected-row"><div><strong>实时回复、文档与画板</strong><p>{snapshot.capabilities.documents ? '已启用 · 回复实时显示，私聊作品仅供本人查看' : '实时显示回复和思考过程，并把复杂方案整理成文档和图示'}</p></div>
         {!snapshot.capabilities.documents && !snapshot.documentSetup && <button className="lark-secondary" disabled={disabled} onClick={() => void mutate('enable-documents')}>补充默认权限</button>}</div>
       {snapshot.documentSetup && <div className="lark-notice" role="status"><p>{snapshot.documentSetup.message}</p>
         {snapshot.documentSetup.phase === 'preparing' && <span className="lark-spinner" aria-label="正在准备授权" />}
-        {snapshot.documentSetup.qr && <><div className="lark-qr"><img src={snapshot.documentSetup.qr.image} alt="文档与画板补充授权二维码" /></div>
+        {snapshot.documentSetup.qr && <><div className="lark-qr"><img src={snapshot.documentSetup.qr.image} alt="默认权限补充授权二维码" /></div>
           <p>{snapshot.documentSetup.qr.expiresAt <= now ? '二维码已过期，请取消后重试。' : '扫码确认后自动完成，聊天连接继续保持。'}</p>
           {snapshot.documentSetup.qr.expiresAt > now && <External url={snapshot.documentSetup.qr.url}>打开飞书授权</External>}</>}
         <div className="lark-actions"><button className="lark-quiet" disabled={disabled} onClick={() => void mutate('cancel-documents')}>返回聊天连接</button>

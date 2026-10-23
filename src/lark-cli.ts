@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { ReplyPayload } from './replies.js';
 
@@ -139,11 +141,12 @@ export class LarkCli {
     this.commandTimeoutMs = timeout(options.commandTimeoutMs, 30_000);
   }
 
-  private launch(args: string[]): ChildProcessWithoutNullStreams {
+  private launch(args: string[], cwd?: string): ChildProcessWithoutNullStreams {
     return spawn(this.executable, ['--profile', this.profile, ...args], {
       shell: false,
       windowsHide: true,
       stdio: 'pipe',
+      ...(cwd ? {cwd} : {}),
     });
   }
 
@@ -372,6 +375,93 @@ export class LarkCli {
     } catch {throw new Error('Invalid Lark feedback card.');}
   }
 
+  /** Create a CardKit card entity. Nothing reaches a chat yet, so a failure needs no delivery guard. */
+  async createCardEntity(card: Record<string, unknown>): Promise<string> {
+    const data = this.cardEntityData(card);
+    const result = await this.executeJson(['api', 'POST', '/open-apis/cardkit/v1/cards', '--data', '-', '--as', 'bot', '--format', 'json'],
+      JSON.stringify({type: 'card_json', data}), 'card', Math.min(this.commandTimeoutMs, 10_000));
+    this.confirmFeedback(result);
+    const receipt = result.data as Record<string, unknown> | undefined;
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || !LarkCli.cardId(receipt.card_id)) {
+      throw new Error('Lark card entity creation was not confirmed.');
+    }
+    return receipt.card_id;
+  }
+
+  /** Reply with a card entity. An unconfirmed reply may still have been delivered; never resend it. */
+  async replyCardEntity(messageId: string, cardId: string, options: {idempotencyKey: string; inThread: boolean}): Promise<void> {
+    if (typeof messageId !== 'string' || !/^om_[A-Za-z0-9_-]{1,256}$/.test(messageId) || !LarkCli.cardId(cardId)
+      || typeof options?.idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{1,50}$/.test(options.idempotencyKey)
+      || typeof options.inThread !== 'boolean') throw new Error('Invalid Lark card reply.');
+    const body = JSON.stringify({msg_type: 'interactive', content: JSON.stringify({type: 'card', data: {card_id: cardId}}),
+      uuid: options.idempotencyKey, reply_in_thread: options.inThread});
+    const result = await this.executeJson(['api', 'POST', `/open-apis/im/v1/messages/${messageId}/reply`,
+      '--data', '-', '--as', 'bot', '--format', 'json'], body, 'reply', this.commandTimeoutMs);
+    this.confirmFeedback(result);
+    const receipt = result.data as Record<string, unknown> | undefined;
+    if (!receipt || typeof receipt !== 'object' || typeof receipt.message_id !== 'string' || !/^om_[A-Za-z0-9_-]{1,256}$/.test(receipt.message_id)) {
+      throw new Error('Lark card reply was not confirmed; delivery is unknown.');
+    }
+  }
+
+  /** Stream one element's complete text. Any later update supersedes a failed one. */
+  async streamCardText(cardId: string, elementId: string, content: string, sequence: number): Promise<void> {
+    if (!LarkCli.cardId(cardId) || typeof elementId !== 'string' || !/^[a-z][a-z0-9_]{0,19}$/.test(elementId)
+      || typeof content !== 'string' || !content || Buffer.byteLength(content) > 100_000 || !LarkCli.sequence(sequence)) {
+      throw new Error('Invalid Lark card stream update.');
+    }
+    const result = await this.executeJson(['api', 'PUT', `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}/content`,
+      '--data', '-', '--as', 'bot', '--format', 'json'], JSON.stringify({content, sequence, uuid: randomUUID()}), 'card',
+    Math.min(this.commandTimeoutMs, 10_000));
+    this.confirmFeedback(result);
+  }
+
+  /** Replace a card entity. Applying the same state twice is harmless, so callers may retry with a newer sequence. */
+  async updateCardEntity(cardId: string, card: Record<string, unknown>, sequence: number): Promise<void> {
+    if (!LarkCli.cardId(cardId) || !LarkCli.sequence(sequence)) throw new Error('Invalid Lark card update.');
+    const data = this.cardEntityData(card);
+    const result = await this.executeJson(['api', 'PUT', `/open-apis/cardkit/v1/cards/${cardId}`, '--data', '-', '--as', 'bot', '--format', 'json'],
+      JSON.stringify({card: {type: 'card_json', data}, sequence, uuid: randomUUID()}), 'card', Math.min(this.commandTimeoutMs, 10_000));
+    this.confirmFeedback(result);
+  }
+
+  /**
+   * Reply with one local file the caller has already validated. Only a
+   * `./basename` crosses argv, resolved from the file's own directory, so it
+   * can never be read as an upload key, a URL or another flag.
+   */
+  async replyFile(messageId: string, path: string, options: {idempotencyKey: string; inThread: boolean; image: boolean}): Promise<void> {
+    const name = typeof path === 'string' ? basename(path) : '';
+    if (typeof messageId !== 'string' || !/^om_[A-Za-z0-9_-]{1,256}$/.test(messageId) || typeof path !== 'string' || !isAbsolute(path)
+      || /[\\/]$/.test(path) || !name || name.length > 255 || /[\u0000-\u001f\u007f/\\]/.test(name) || name === '.' || name === '..'
+      || typeof options?.idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{1,50}$/.test(options.idempotencyKey)
+      || typeof options.inThread !== 'boolean' || typeof options.image !== 'boolean') throw new Error('Invalid Lark file reply.');
+    const args = ['im', '+messages-reply', '--message-id', messageId, `--${options.image ? 'image' : 'file'}=./${name}`,
+      '--as', 'bot', '--format', 'json', '--idempotency-key', options.idempotencyKey];
+    if (options.inThread) args.push('--reply-in-thread');
+    // Uploads take longer than text; the deadline still bounds an unknown result.
+    await this.executeJson(args, '', 'reply', Math.max(this.commandTimeoutMs, 120_000), dirname(path));
+  }
+
+  private cardEntityData(card: Record<string, unknown>): string {
+    let data: string;
+    try {
+      if (!card || typeof card !== 'object' || Array.isArray(card) || card.schema !== '2.0') throw new Error();
+      data = JSON.stringify(card);
+    } catch {throw new Error('Invalid Lark card entity.');}
+    // CardKit rejects cards over 30 KB; keep a margin for the request envelope.
+    if (Buffer.byteLength(data) > 28_500) throw new Error('Lark card entity exceeds the size limit.');
+    return data;
+  }
+
+  private static cardId(value: unknown): value is string {
+    return typeof value === 'string' && /^[0-9A-Za-z_-]{1,64}$/.test(value);
+  }
+
+  private static sequence(value: unknown): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= 2_147_483_647;
+  }
+
   private confirmFeedback(result: Record<string, unknown>): void {
     if (result.identity !== 'bot' || (result.dry_run !== undefined && result.dry_run !== false)) {
       throw new Error('Lark feedback command did not confirm bot delivery; delivery is unknown.');
@@ -481,13 +571,14 @@ export class LarkCli {
     return this.executeJson(args, input, 'reply', this.commandTimeoutMs).then(() => undefined);
   }
 
-  private executeJson(args: string[], input: string, operation: 'reply' | 'progress' | 'send' | 'feedback', deadlineMs: number): Promise<Record<string, unknown>> {
+  private executeJson(args: string[], input: string, operation: 'reply' | 'progress' | 'send' | 'feedback' | 'card', deadlineMs: number,
+    cwd?: string): Promise<Record<string, unknown>> {
     if (this.stopped) return Promise.reject(new Error('Lark transport is stopped.'));
     const label = `Lark ${operation} command`;
-    const uncertain = operation === 'progress' ? 'result is unknown.' : 'delivery is unknown.';
+    const uncertain = operation === 'progress' || operation === 'card' ? 'result is unknown.' : 'delivery is unknown.';
     return new Promise((resolve, reject) => {
       let child: ChildProcessWithoutNullStreams;
-      try { child = this.launch(args); } catch {
+      try { child = this.launch(args, cwd); } catch {
         reject(new Error(`Could not start the Lark ${operation} command.`));
         return;
       }

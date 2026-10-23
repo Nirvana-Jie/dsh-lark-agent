@@ -9,7 +9,9 @@ interface DraftBase {title: string; summary: string; replaces?: string}
 export type PresentationDraft = DraftBase & (
   | {kind: 'chart'; content: ChartContent} | {kind: 'diagram'; content: DiagramContent}
   | {kind: 'report'; content: ReportContent} | {kind: 'form'; content: FormContent});
-export interface TurnResult {text: string; artifacts: PresentationDraft[]}
+/** A file the host's own delivery tool presented; the path is absolute and not yet validated for upload. */
+export interface DeliveredFile {path: string; description: string}
+export interface TurnResult {text: string; artifacts: PresentationDraft[]; reasoning?: string; files?: DeliveredFile[]}
 export const PRESENT_TOOL = 'lark_present';
 export const PRESENTATION_GUIDE = '需要图表、流程图、长报告或收集选项时，可以调用 lark_present。普通聊天和代码解释直接用文字。工具只准备当前聊天的展示内容，不执行 HTML/JavaScript，不读取文件，不扩大任何人的权限。图表数据必须来自用户或已核实的资料；示例数据必须在标题或摘要标明“示例”。表单只收集完成当前任务必需的普通信息，不索取密码、密钥或其他敏感凭据。不要重复输出已提交工具的整份内容，也不要声称已创建云文档或链接；以系统最终展示结果为准。修改已展示作品时，只使用当前聊天提供的作品 ID 作为 replaces，保留原版。';
 

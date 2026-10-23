@@ -103,12 +103,14 @@ describe('signed card actions', () => {
     expect(actions.verify(token)).toBeUndefined();
   });
 
-  it.each(['/help', '/status', '/sessions', '/memory', '/memory global', '/memory chat', '/memory show 012345abcdef', '/new', '/resume 012345abcdef', '/forget 012345abcdef'])('accepts only supported command %s', async command => {
+  it.each(['/help', '/status', '/sessions', '/memory', '/memory global', '/memory chat', '/memory show 012345abcdef', '/new', '/resume 012345abcdef', '/forget 012345abcdef',
+    '/approve 012345abcdef', '/deny 012345abcdef', '/reply 012345abcdef', '/choose 012345abcdef 0', '/choose 012345abcdef 12'])('accepts only supported command %s', async command => {
     const actions = await CardActions.open(await temporary(), namespace);
     expect(actions.verify(actions.issue({...sample, command}))?.command).toBe(command);
   });
 
-  it.each(['/bash rm', '/remember secret', '/stop', '/memory search name', '/memory show OTHER', '/resume ../bad', '/new\n', '/status\n/new', '/help ', ' /help', '/help\t'])('rejects unsupported command %j at issuance', async command => {
+  it.each(['/bash rm', '/remember secret', '/stop', '/memory search name', '/memory show OTHER', '/resume ../bad', '/new\n', '/status\n/new', '/help ', ' /help', '/help\t',
+    '/approve 012345abcdeg', '/approve', '/choose 012345abcdef', '/choose 012345abcdef 123', '/reply 012345abcdef 1'])('rejects unsupported command %j at issuance', async command => {
     const actions = await CardActions.open(await temporary(), namespace);
     expect(() => actions.issue({...sample, command})).toThrow('Invalid card action binding');
   });
