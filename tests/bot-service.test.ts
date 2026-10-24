@@ -17,6 +17,7 @@ vi.mock('../src/card-actions.js', () => ({CardActions: {open: async () => ({})}}
 vi.mock('../src/direct-chats.js', () => ({DirectChatsStore: {open: mocks.directOpen}}));
 vi.mock('../src/model-preferences.js', () => ({ModelPreferencesStore: {open: mocks.preferencesOpen}}));
 vi.mock('../src/artifacts.js', () => ({ArtifactStore: {open: async () => ({})}}));
+vi.mock('../src/permission-preferences.js', () => ({PermissionPreferencesStore: {open: async () => ({})}}));
 vi.mock('../src/dsh-runtime.js', () => ({DshRuntime: class {}}));
 vi.mock('../src/bridge.js', () => ({BotBridge: class {
   accept = mocks.accept; stop = mocks.bridgeStop; sweep = mocks.sweep; setCardActionsReady = mocks.cardReady;

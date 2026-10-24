@@ -11,6 +11,8 @@ import { DiskLedger } from '../src/ledger.js';
 import { MemoryStore } from '../src/memory-store.js';
 import type { ReplyPayload } from '../src/replies.js';
 import { SessionStore } from '../src/session-store.js';
+import { ModelPreferencesStore } from '../src/model-preferences.js';
+import { PermissionPreferencesStore } from '../src/permission-preferences.js';
 
 const directories: string[] = [];
 const bridges = new Set<BotBridge>();
@@ -52,7 +54,9 @@ function tokens(payload: ReplyPayload | undefined): string[] {
   return found;
 }
 
-async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>} = {}) {
+const PERMISSIONS = [{id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改'}, {id: 'danger-full-access', name: '完全权限'}];
+
+async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-channel-bridge-'));
   directories.push(directory);
   const workspace = join(directory, 'alice');
@@ -66,11 +70,19 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const ledger = await DiskLedger.open(config.stateDir);
   const run = vi.fn<Run>(options.run ?? (async () => '普通回答'));
   const policies: AgentPolicy[] = [];
+  const handles: Array<RuntimeSession & {setPermission?: ReturnType<typeof vi.fn>}> = [];
   const handle = (policy: AgentPolicy, id: string = randomUUID()): RuntimeSession => {
     policies.push(policy);
-    return {id, run: (...args) => run(...args), checkpoint: vi.fn(async () => undefined), cancel: vi.fn(), dispose: vi.fn(async () => undefined)};
+    let current = 'workspace-write';
+    const value = {id, run: (...args: Parameters<Run>) => run(...args), checkpoint: vi.fn(async () => undefined), cancel: vi.fn(), dispose: vi.fn(async () => undefined),
+      ...(options.permissions ? {permissionState: () => ({current, options: PERMISSIONS}), setPermission: vi.fn((next: string) => { current = next; })} : {})};
+    handles.push(value);
+    return value;
   };
-  const runtime = {create: vi.fn(async (policy: AgentPolicy) => handle(policy)), resume: vi.fn(async (policy: AgentPolicy, id: string) => handle(policy, id))};
+  const runtime = {create: vi.fn(async (policy: AgentPolicy) => handle(policy)), resume: vi.fn(async (policy: AgentPolicy, id: string) => handle(policy, id)),
+    ...(options.permissions ? {permissionOptions: () => PERMISSIONS} : {}),
+    ...(options.models ? {catalog: async () => ({models: [{provider: 'p', providerName: 'Provider', model: 'm', name: 'Model'}], defaultSelection: {provider: 'p', model: 'm'}}),
+      resolveModelSelection: async (selection?: {provider: string; model: string}) => selection ?? {provider: 'p', model: 'm'}} : {})};
   let feedbackCount = 0;
   const transport = {
     reply: vi.fn(async (_id: string, _text: string, _options: unknown) => undefined),
@@ -85,13 +97,16 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   };
   const progress = {startProgress: vi.fn(async () => 'reaction'), finishProgress: vi.fn(async () => undefined)};
   const audit = vi.fn();
-  const bridge = new BotBridge(config, runtime, transport, ledger, {sessions, memories, actions}, audit, progress);
+  const permissionPreferences = options.permissions ? await PermissionPreferencesStore.open(config.stateDir) : undefined;
+  const modelPreferences = options.models ? await ModelPreferencesStore.open(config.stateDir) : undefined;
+  const bridge = new BotBridge(config, runtime, transport, ledger, {sessions, memories, actions,
+    ...(permissionPreferences ? {permissionPreferences} : {}), ...(modelPreferences ? {modelPreferences} : {})}, audit, progress);
   bridge.setCardActionsReady(true);
   bridges.add(bridge);
   const sentText = () => [...transport.reply.mock.calls.map(call => call[1]),
     ...transport.replyRich.mock.calls.map(call => call[1].kind === 'text' ? call[1].text : call[1].kind === 'post' ? call[1].markdown : call[1].fallbackText)];
   const finalCard = () => JSON.stringify(transport.updateCardEntity.mock.calls.at(-1)?.[1] ?? {});
-  return {bridge, run, runtime, policies, transport, progress, audit, actions, workspace, sentText, finalCard};
+  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences};
 }
 
 describe('BotBridge harness channel', () => {
@@ -254,5 +269,43 @@ describe('harness channel help', () => {
     const [own, inGroup] = h.sentText();
     expect(own).toContain('这里连着你电脑上的 Harness');
     expect(inGroup).not.toContain('Harness');
+  });
+});
+
+describe('harness channel permission switch', () => {
+  const rich = (h: Awaited<ReturnType<typeof setup>>) => h.transport.replyRich.mock.calls.map(call => call[1]);
+
+  it('switches the private chat from a card, with a second confirmation for full access, and keeps it for new sessions', async () => {
+    const h = await setup({streaming: false, permissions: true});
+    await h.bridge.accept(event('hello'));
+    expect(h.handles[0]!.setPermission).not.toHaveBeenCalled();
+    await h.bridge.accept(event('/permission'));
+    const panel = rich(h).at(-1)!;
+    expect(JSON.stringify(panel)).toContain('当前：工作区内修改');
+    const buttons = tokens(panel).map(token => ({token, command: h.actions.verify(token)!.command}));
+    expect(buttons.map(button => button.command)).toEqual(['/permission use read-only', '/permission use workspace-write', '/permission use danger-full-access']);
+    expect(JSON.stringify(panel)).toContain('切换到「完全权限」？');
+    await h.bridge.accept(callback(buttons[2]!.token));
+    expect(h.handles[0]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
+    expect(JSON.stringify(rich(h).at(-1))).toContain('权限模式已更新');
+    // A one-time button cannot switch again.
+    await h.bridge.accept(callback(buttons[2]!.token));
+    expect(h.handles[0]!.setPermission).toHaveBeenCalledOnce();
+    await h.bridge.accept(event('/new'));
+    await h.bridge.accept(event('next topic'));
+    expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
+  });
+
+  it('reaches the switch from the model settings panel', async () => {
+    const h = await setup({streaming: false, permissions: true, models: true});
+    await h.bridge.accept(event('/model'));
+    const commands = tokens(rich(h).at(-1)).map(token => h.actions.verify(token)!.command);
+    expect(commands).toContain('/permission');
+  });
+
+  it('keeps permission switching to the owner private chat', async () => {
+    const h = await setup({streaming: false, permissions: true});
+    await h.bridge.accept(group('/permission'));
+    expect(h.sentText()).toEqual(['权限模式只能在你和我的私聊里切换。']);
   });
 });

@@ -67,6 +67,9 @@ export interface UserQuestion {
   detail?: string;
 }
 export interface QuestionAnswer {id: string; selected: string[]; custom?: string}
+/** A host permission preset, such as read-only, workspace-write or full access. */
+export interface PermissionOption {id: string; name: string; description?: string}
+export interface PermissionState {current: string; options: PermissionOption[]}
 
 /** One turn's channel hooks. A harness-mode session asks its owner through them. */
 export interface TurnObserver {
@@ -103,9 +106,13 @@ export interface RuntimeSession {
   modelSelection?(): ModelSelection;
   /** Call only after the bridge validates and durably saves the complete choice. */
   setModelSelection?(next: ModelSelection): void;
+  /** Harness sessions on a host with permission presets; undefined otherwise. */
+  permissionState?(): PermissionState | undefined;
+  /** Switch this session's permission preset, as the App's own selector does. */
+  setPermission?(id: string): void;
 }
 
-export type RuntimeErrorCode = 'SETUP_FAILED' | 'RESTORE_FAILED' | 'SESSION_IN_USE' | 'PERSISTENCE_FAILED' | 'TURN_FAILED' | 'CANCELLED' | 'OUTPUT_LIMIT' | 'BUSY' | 'DISPOSED' | 'MODEL_UNAVAILABLE' | 'INVALID_MODEL_SELECTION';
+export type RuntimeErrorCode = 'SETUP_FAILED' | 'RESTORE_FAILED' | 'SESSION_IN_USE' | 'PERSISTENCE_FAILED' | 'TURN_FAILED' | 'CANCELLED' | 'OUTPUT_LIMIT' | 'BUSY' | 'DISPOSED' | 'MODEL_UNAVAILABLE' | 'INVALID_MODEL_SELECTION' | 'PERMISSION_UNAVAILABLE';
 
 /** Safe to show to a chat user: never contains a provider, tool, or host error. */
 export class DshRuntimeError extends Error {
@@ -122,6 +129,7 @@ export class DshRuntimeError extends Error {
       DISPOSED: '当前会话已关闭，请重新开始。',
       MODEL_UNAVAILABLE: '当前宿主暂时无法提供模型选项，请检查模型配置。',
       INVALID_MODEL_SELECTION: '这个模型或思考深度当前不可用，请刷新选项后重试。',
+      PERMISSION_UNAVAILABLE: '权限模式暂时无法在飞书切换，请在电脑上的 Harness 里调整。',
     };
     super(messages[code]);
     this.name = 'DshRuntimeError';
@@ -336,6 +344,34 @@ async function presetIdOf(presets: PresetService, requested?: string): Promise<s
   const id = (await presets.resolve(requested))?.id;
   if (typeof id !== 'string' || !id) throw new Error('The host returned an invalid agent preset');
   return id;
+}
+
+/** Optional host service behind the App's permission selector. A legacy host has no catalog. */
+interface PermissionPresetService {
+  catalog(): unknown;
+  current(session: Session): unknown;
+  set(session: Session, name: string): void;
+}
+function permissionPresets(ctx: Context): PermissionPresetService | undefined {
+  const service = ctx.get('permissionPresets') as Partial<PermissionPresetService> | undefined;
+  return typeof service?.catalog === 'function' && typeof service.current === 'function' && typeof service.set === 'function'
+    ? service as PermissionPresetService : undefined;
+}
+/** Selectable presets from the host catalog: identifiers and labels only, bounded. */
+function permissionOptions(service: PermissionPresetService): PermissionOption[] {
+  let catalog: unknown;
+  try { catalog = service.catalog(); } catch { return []; }
+  const raw = catalog && typeof catalog === 'object' ? (catalog as {options?: unknown}).options : undefined;
+  if (!Array.isArray(raw)) return [];
+  const options: PermissionOption[] = [];
+  for (const entry of raw.slice(0, 10)) {
+    const option = entry && typeof entry === 'object' ? entry as {value?: unknown; name?: unknown; description?: unknown} : undefined;
+    if (typeof option?.value !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(option.value) || options.some(item => item.id === option.value)) continue;
+    const name = typeof option.name === 'string' ? clip(option.name, 30) : '';
+    options.push({id: option.value, name: name || option.value,
+      ...(typeof option.description === 'string' && option.description.trim() ? {description: clip(option.description, 200)} : {})});
+  }
+  return options;
 }
 
 /** Optional host service: explicit policy routes also work without it. */
@@ -592,6 +628,12 @@ export class DshRuntime {
 
   async create(policy: AgentPolicy): Promise<RuntimeSession> {
     return this.build(policy);
+  }
+
+  /** The host's selectable permission presets, for a chat that has no live session yet. */
+  permissionOptions(): PermissionOption[] {
+    const service = permissionPresets(this.ctx);
+    return service ? permissionOptions(service) : [];
   }
 
   /** The preset a stored session runs on: its current projection, else its header. */
@@ -972,6 +1014,22 @@ export class DshRuntime {
         if (disposed) throw new DshRuntimeError('DISPOSED');
         if (active || agent.status === 'running') throw new DshRuntimeError('BUSY');
         selected.current = nativeSelection(modelSelection(next));
+      },
+      permissionState: () => {
+        const service = harness && !disposed ? permissionPresets(this.ctx) : undefined;
+        const options = service ? permissionOptions(service) : [];
+        if (!service || !options.length) return;
+        let current: unknown;
+        try { current = service.current(agent.session); } catch { return; }
+        return {current: typeof current === 'string' ? current : 'custom', options};
+      },
+      setPermission: (id) => {
+        if (disposed) throw new DshRuntimeError('DISPOSED');
+        if (active || agent.status === 'running') throw new DshRuntimeError('BUSY');
+        const service = harness ? permissionPresets(this.ctx) : undefined;
+        if (!service || !permissionOptions(service).some(option => option.id === id)) throw new DshRuntimeError('PERMISSION_UNAVAILABLE');
+        // The host records the selection and updates its sandbox and approval knobs.
+        try { service.set(agent.session, id); } catch { throw new DshRuntimeError('PERMISSION_UNAVAILABLE'); }
       },
       async run(text, signal, context, observer) {
         if (disposed) throw new DshRuntimeError('DISPOSED');

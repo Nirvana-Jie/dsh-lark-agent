@@ -75,6 +75,7 @@ The Feishu entry works only while the host is online: not when the app is closed
 | Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card, with its thinking and tool steps folded inside |
 | Ask for something that needs your OK | Sends a confirmation card: tap **允许一次** (allow once) or **拒绝** (deny); no answer within 5 minutes means it won't run |
 | Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
+| Use `/permission`, or 权限模式 in the model settings card | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking |
 | Ask for the result file | Sends files from its workspace straight to the chat |
 | Say "lead with the conclusion from now on" | Remembers the preference |
 | Keep chatting, or use `/sessions`, `/new` | Continues the topic, returns to an earlier one, or starts fresh |

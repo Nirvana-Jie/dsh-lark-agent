@@ -1271,3 +1271,56 @@ describe('harness sessions use the host agent preset', () => {
     expect(invalid.create).not.toHaveBeenCalled();
   });
 });
+
+describe('harness permission presets', () => {
+  const ownerMemory = (): MemoryAccess => ({privateChat: true, list: vi.fn(async () => []), search: vi.fn(async () => []),
+    remember: vi.fn(async () => { throw new Error('unused'); }), forget: vi.fn(async () => false)});
+  const withPermissions = (f: ReturnType<typeof fixture>) => {
+    const service = {
+      catalog: vi.fn(() => ({options: [{value: 'read-only', name: '仅可查看'}, {value: 'workspace-write', name: '工作区内修改', description: '工作区内可写'},
+        {value: 'danger-full-access', name: '完全权限'}, {value: 'Bad Value', name: 'ignored'}, {value: 'read-only', name: 'duplicate'}],
+        defaultPreset: 'workspace-write'})),
+      current: vi.fn((_session: unknown) => 'workspace-write'),
+      set: vi.fn((_session: unknown, _name: string) => undefined),
+    };
+    const original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(name => name === 'permissionPresets' ? service : original(name));
+    return service;
+  };
+
+  it('reads the host catalog and switches the session like the App selector', async () => {
+    const f = fixture();
+    const service = withPermissions(f);
+    const session = await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    expect(session.permissionState!()).toEqual({current: 'workspace-write', options: [
+      {id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改', description: '工作区内可写'}, {id: 'danger-full-access', name: '完全权限'},
+    ]});
+    session.setPermission!('danger-full-access');
+    expect(service.set).toHaveBeenCalledExactlyOnceWith(f.session, 'danger-full-access');
+    expect(() => session.setPermission!('Bad Value')).toThrow(expect.objectContaining({code: 'PERMISSION_UNAVAILABLE'}));
+    expect(f.runtime.permissionOptions().map(option => option.id)).toEqual(['read-only', 'workspace-write', 'danger-full-access']);
+  });
+
+  it('offers no permission switch to a restricted session or a host without a catalog', async () => {
+    const restricted = fixture();
+    const service = withPermissions(restricted);
+    const session = await restricted.runtime.create(basePolicy);
+    expect(session.permissionState!()).toBeUndefined();
+    expect(() => session.setPermission!('read-only')).toThrow(expect.objectContaining({code: 'PERMISSION_UNAVAILABLE'}));
+    expect(service.set).not.toHaveBeenCalled();
+    const rosterless = fixture();
+    const plain = await rosterless.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    expect(plain.permissionState!()).toBeUndefined();
+    expect(rosterless.runtime.permissionOptions()).toEqual([]);
+  });
+
+  it('refuses to switch during a running turn', async () => {
+    const f = fixture();
+    withPermissions(f);
+    const session = await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    let busy: unknown;
+    f.agent.whenIdle.mockImplementationOnce(async () => { try { session.setPermission!('read-only'); } catch (error) { busy = error; } });
+    await session.run('work', new AbortController().signal);
+    expect(busy).toMatchObject({code: 'BUSY'});
+  });
+});

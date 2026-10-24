@@ -6,6 +6,8 @@ export const BOT_MENU_COMMANDS = Object.freeze({
   'dsh.sessions': '/sessions',
   'dsh.model': '/model',
   'dsh.thinking': '/thinking',
+  // Optional: not in the default five-node menu; an owner may add it under 设置.
+  'dsh.permission': '/permission',
 } as const);
 export type BotMenuCommand = (typeof BOT_MENU_COMMANDS)[keyof typeof BOT_MENU_COMMANDS];
 
