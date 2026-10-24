@@ -18,18 +18,15 @@ function harness(overrides: Partial<Record<keyof LiveCardTransport, (...args: an
   const advance = (ms: number) => { clock += ms; };
   const sequences = () => [...transport.streamCardText.mock.calls.map(call => call[3]), ...transport.updateCardEntity.mock.calls.map(call => call[2])]
     .sort((a, b) => a - b);
-  return {transport, audit, sleep, reply, advance, sequences};
+  const last = () => transport.updateCardEntity.mock.calls.at(-1)![1];
+  return {transport, audit, sleep, reply, advance, sequences, last};
 }
 
 const elements = (card: unknown) => (card as Card).body.elements;
 const panel = (card: unknown) => elements(card).find(element => element.tag === 'collapsible_panel');
-const element = (card: unknown, id: string) => {
-  for (const item of elements(card)) {
-    if (item.element_id === id) return item;
-    const nested = (item.elements as Array<Record<string, any>> | undefined)?.find(child => child.element_id === id);
-    if (nested) return nested;
-  }
-};
+const title = (card: unknown) => panel(card)?.header.title.content as string;
+const rows = (card: unknown) => (panel(card)?.elements ?? []) as Array<Record<string, any>>;
+const element = (card: unknown, id: string) => [...elements(card), ...rows(card)].find(item => item.element_id === id);
 
 describe('LiveReply streaming card', () => {
   it('keeps the ordinary reply path when the card entity cannot be created', async () => {
@@ -39,40 +36,43 @@ describe('LiveReply streaming card', () => {
     expect(h.audit).toHaveBeenCalledWith('live-card-unavailable');
   });
 
-  it('opens one streaming card as a reply to the prompt', async () => {
+  it('opens one streaming card as a reply to the prompt, with the process folded', async () => {
     const h = harness();
     await expect(h.reply.open()).resolves.toBe(true);
     const card = h.transport.createCardEntity.mock.calls[0]![0];
     expect((card as Card).config).toMatchObject({update_multi: true, streaming_mode: true, summary: {content: '正在思考…'}});
-    // The process stays folded; the reader opens it on demand.
     expect(panel(card)).toMatchObject({element_id: 'think_panel', expanded: false});
-    expect(panel(card)?.header.title.content).toBe('💭 思考中…');
-    expect(element(card, 'think')?.content).toContain('正在思考');
+    // Plain text: a tool detail in the title can never become a link or mention.
+    expect(panel(card)?.header.title).toEqual({tag: 'plain_text', content: '正在思考…'});
+    expect(rows(card)[0]?.content).toContain('正在思考');
     expect(h.transport.replyCardEntity).toHaveBeenCalledWith('om_prompt', '7355', {idempotencyKey: 'live-key', inThread: false});
   });
 
-  it('keeps streaming when the reply result is unknown, because it may have been delivered', async () => {
+  it('keeps updating when the reply result is unknown, because it may have been delivered', async () => {
     const h = harness({replyCardEntity: async () => { throw new Error('timeout'); }});
     await expect(h.reply.open()).resolves.toBe(true);
     expect(h.audit).toHaveBeenCalledWith('live-card-delivery-unknown');
     h.reply.push({type: 'reasoning', text: 'still visible'});
-    await vi.waitFor(() => expect(h.transport.streamCardText).toHaveBeenCalled());
+    await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalled());
+    expect(element(h.last(), 's0')?.content).toContain('still visible');
   });
 
-  it('streams reasoning into the folded panel, retitles it when the answer starts, then streams the answer', async () => {
+  it('adds each thought as a row, streams its growth, retitles the panel when the answer starts, then streams the answer', async () => {
     const h = harness();
     await h.reply.open();
     h.reply.push({type: 'attempt'});
     h.reply.push({type: 'reasoning', text: 'Compare the two '});
-    h.reply.push({type: 'reasoning', text: 'options first.'});
-    await vi.waitFor(() => expect(h.transport.streamCardText).toHaveBeenCalledWith('7355', 'think', expect.stringContaining('Compare the two options first.'), 1));
-    h.reply.push({type: 'text', text: 'Option A'});
     await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalledTimes(1));
-    const answering = h.transport.updateCardEntity.mock.calls[0]![1];
-    expect(panel(answering)).toMatchObject({expanded: false});
-    expect(panel(answering)?.header.title.content).toMatch(/^💭 思考了 \d+ 秒$/);
-    expect((answering as Card).config).toMatchObject({streaming_mode: true});
-    expect(element(answering, 'answer')?.content).toBe('Option A');
+    expect(element(h.last(), 's0')).toMatchObject({icon: {token: 'mindnote_outlined'}});
+    h.reply.push({type: 'reasoning', text: 'options first.'});
+    await vi.waitFor(() => expect(h.transport.streamCardText).toHaveBeenCalledWith('7355', 's0', expect.stringContaining('Compare the two options first.'), expect.any(Number)));
+    h.advance(3_000);
+    h.reply.push({type: 'text', text: 'Option A'});
+    await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalledTimes(2));
+    expect(panel(h.last())).toMatchObject({expanded: false});
+    expect(title(h.last())).toBe('已思考 3 秒');
+    expect((h.last() as Card).config).toMatchObject({streaming_mode: true});
+    expect(element(h.last(), 'answer')?.content).toBe('Option A');
     h.reply.push({type: 'text', text: ' is faster.'});
     await vi.waitFor(() => expect(h.transport.streamCardText).toHaveBeenCalledWith('7355', 'answer', 'Option A is faster.', expect.any(Number)));
     const sequences = h.sequences();
@@ -80,57 +80,77 @@ describe('LiveReply streaming card', () => {
     expect(sequences[0]).toBe(1);
   });
 
-  it('drops a retried attempt and shows tool progress among the thinking steps', async () => {
+  it('names the running step in the title and shows tool calls as App-style rows', async () => {
     const h = harness();
     await h.reply.open();
     h.reply.push({type: 'attempt'});
     h.reply.push({type: 'text', text: 'draft that will be retried'});
     h.reply.push({type: 'discard'});
     h.reply.push({type: 'attempt'});
-    h.reply.push({type: 'tool', callId: 'c1', name: 'web_search', detail: 'LodyAI'});
+    h.reply.push({type: 'tool', callId: 'c1', name: 'web_search', detail: 'LodyAI 是什么'});
+    await vi.waitFor(() => expect(title(h.last())).toBe('正在搜索网页 · LodyAI 是什么'));
+    expect(element(h.last(), 's0')).toMatchObject({icon: {token: 'internet_outlined', color: 'grey'}});
+    expect(element(h.last(), 's0')?.content).toContain('进行中');
     h.reply.push({type: 'tool-done', callId: 'c1', ok: true});
+    h.reply.push({type: 'tool', callId: 'c2', name: 'bash', detail: 'npm test', code: true});
+    h.reply.push({type: 'tool-done', callId: 'c2', ok: true, exitCode: 1});
     h.reply.push({type: 'text', text: 'final'});
     await expect(h.reply.finish({phase: 'done', answer: 'final'})).resolves.toBe(true);
-    const final = h.transport.updateCardEntity.mock.calls.at(-1)![1];
-    expect(element(final, 'think')?.content).toContain('✅ `web_search` `LodyAI`');
+    const final = h.last();
+    expect(element(final, 's0')?.content).toBe("网页搜索 · <font color='grey'>LodyAI 是什么</font>");
+    expect(element(final, 's1')).toMatchObject({icon: {token: 'code_outlined', color: 'red'}});
+    expect(element(final, 's1')?.content).toBe("运行命令 · `npm test` · <font color='red'>退出码 1</font>");
     expect(element(final, 'answer')?.content).toBe('final');
     expect(JSON.stringify(final)).not.toContain('draft that will be retried');
     expect(panel(final)).toMatchObject({expanded: false});
-    expect(panel(final)?.header.title.content).toMatch(/^💭 思考了 \d+ 秒 · 使用工具 1 次$/);
+    expect(title(final)).toMatch(/^已完成，用时 \d+ 秒 · 2 次工具调用$/);
   });
 
-  it('writes an inert final card and closes streaming mode', async () => {
+  it('writes an inert final card with the settings footer and closes streaming mode', async () => {
     const h = harness();
     await h.reply.open();
+    h.reply.setFooter('DeepSeek V4 · 思考深度 高 · 权限 完全权限');
+    await vi.waitFor(() => expect(element(h.last(), 'footer')?.content).toContain('DeepSeek V4 · 思考深度 高'));
     h.advance(4_000);
     await expect(h.reply.finish({phase: 'done', answer: 'Hi <at id=all></at> [x](javascript:alert(1))', reasoning: 'why'})).resolves.toBe(true);
-    const final = h.transport.updateCardEntity.mock.calls.at(-1)![1];
+    const final = h.last();
     expect((final as Card).config).toMatchObject({streaming_mode: false});
     expect((final as Card).config).not.toHaveProperty('streaming_config');
     expect(element(final, 'answer')?.content).not.toContain('<at');
     expect(element(final, 'answer')?.content).not.toContain('](javascript:');
-    expect(element(final, 'think')?.content).toBe('why');
-    expect(panel(final)?.header.title.content).toBe('💭 思考了 4 秒');
+    expect(rows(final).map(row => row.content)).toEqual(['why']);
+    expect(title(final)).toBe('已完成，用时 4 秒');
+    expect(elements(final).at(-1)).toMatchObject({element_id: 'footer', icon: {token: 'robot_outlined'}});
   });
 
-  it('keeps a long answer in one card, gives it priority over the folded process, and says when it was cut', async () => {
+  it('shows a long process in full when it fits, and an answer first when the card cannot hold both', async () => {
     const h = harness();
     await h.reply.open();
-    h.reply.push({type: 'reasoning', text: '推理'.repeat(3_000)});
-    // Fits once the process yields its space.
+    // Larger than the old 8 KB cap: the whole thought stays visible.
+    const thought = '推理'.repeat(2_000);
+    h.reply.push({type: 'reasoning', text: thought});
+    await expect(h.reply.finish({phase: 'done', answer: 'short answer'})).resolves.toBe(true);
+    expect(element(h.last(), 's0')?.content).toBe(thought);
+    expect(Buffer.byteLength(JSON.stringify(h.last()))).toBeLessThanOrEqual(28_000);
+
+    const busy = harness();
+    await busy.reply.open();
+    busy.reply.push({type: 'reasoning', text: '推理'.repeat(3_000)});
     const fitting = Array.from({length: 20}, (_unused, index) => `第 ${index} 段：${'内容'.repeat(190)}`).join('\n\n');
-    await expect(h.reply.finish({phase: 'done', answer: fitting})).resolves.toBe(true);
-    const final = h.transport.updateCardEntity.mock.calls.at(-1)![1];
+    await expect(busy.reply.finish({phase: 'done', answer: fitting})).resolves.toBe(true);
+    const final = busy.last();
     expect(Buffer.byteLength(JSON.stringify(final))).toBeLessThanOrEqual(28_000);
     expect(element(final, 'answer')?.content).toBe(fitting);
     expect(element(final, 'note')).toBeUndefined();
-    expect(panel(final)?.header.title.content).toMatch(/^💭 思考了/);
+    // The thought keeps its most recent part, marked as cut.
+    expect(element(final, 's0')?.content).toMatch(/^<font color='grey'>…<\/font>\n(推理)+$/);
+    expect(title(final)).toMatch(/^已完成/);
 
     const longer = harness();
     await longer.reply.open();
     const answer = Array.from({length: 80}, (_unused, index) => `第 ${index} 段：${'内容'.repeat(120)}`).join('\n\n');
     await expect(longer.reply.finish({phase: 'done', answer})).resolves.toBe(true);
-    const cut = longer.transport.updateCardEntity.mock.calls.at(-1)![1];
+    const cut = longer.last();
     expect(Buffer.byteLength(JSON.stringify(cut))).toBeLessThanOrEqual(28_000);
     const shown = element(cut, 'answer')?.content as string;
     expect(answer.startsWith(shown.trimEnd())).toBe(true);
@@ -138,6 +158,21 @@ describe('LiveReply streaming card', () => {
     expect(element(cut, 'note')?.content).toContain('飞书卡片的长度上限');
     // Nothing is left over to send as another message.
     expect(longer.transport.replyCardEntity).toHaveBeenCalledOnce();
+  });
+
+  it('folds the oldest steps into a note when there are more than the card can list', async () => {
+    const h = harness();
+    await h.reply.open();
+    for (let index = 0; index < 70; index++) {
+      h.reply.push({type: 'tool', callId: `c${index}`, name: 'read', detail: `file-${index}.md`, code: true});
+      h.reply.push({type: 'tool-done', callId: `c${index}`, ok: true});
+    }
+    await expect(h.reply.finish({phase: 'done', answer: 'read them all'})).resolves.toBe(true);
+    const listed = rows(h.last());
+    expect(listed[0]).toMatchObject({element_id: 'omitted'});
+    expect(listed).toHaveLength(61);
+    expect(listed.at(-1)?.content).toContain('file-69.md');
+    expect(title(h.last())).toMatch(/70 次工具调用$/);
   });
 
   it('retries the idempotent final update and reports an unconfirmed card', async () => {
@@ -155,19 +190,22 @@ describe('LiveReply streaming card', () => {
     const h = harness({streamCardText: async () => { throw new Error('streaming closed'); }});
     await h.reply.open();
     h.reply.push({type: 'reasoning', text: 'first'});
-    await vi.waitFor(() => expect(h.audit).toHaveBeenCalledWith('live-card-degraded'));
+    await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalledTimes(1));
     h.reply.push({type: 'reasoning', text: ' second'});
-    await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalled());
-    expect(element(h.transport.updateCardEntity.mock.calls[0]![1], 'think')?.content).toContain('first second');
+    await vi.waitFor(() => expect(h.audit).toHaveBeenCalledWith('live-card-degraded'));
+    h.reply.push({type: 'reasoning', text: ' third'});
+    await vi.waitFor(() => expect(element(h.last(), 's0')?.content).toContain('first second third'));
   });
 
   it('turns streaming mode back on before Feishu closes it after ten minutes', async () => {
     const h = harness();
     await h.reply.open();
-    h.advance(9 * 60_000 + 1);
     h.reply.push({type: 'reasoning', text: 'long task'});
     await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalledTimes(1));
-    expect((h.transport.updateCardEntity.mock.calls[0]![1] as Card).config).toMatchObject({streaming_mode: true});
+    h.advance(9 * 60_000 + 1);
+    h.reply.push({type: 'reasoning', text: ' continues'});
+    await vi.waitFor(() => expect(h.transport.updateCardEntity).toHaveBeenCalledTimes(2));
+    expect((h.last() as Card).config).toMatchObject({streaming_mode: true});
     expect(h.transport.streamCardText).not.toHaveBeenCalled();
   });
 });

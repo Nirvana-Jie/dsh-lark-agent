@@ -18,9 +18,13 @@ describe('native bot menu configuration', () => {
         expect(botMenuCommand(node.event_key)).toBeDefined();
       } else expect(node.event_key).toBeUndefined();
     }
-    expect(nodes.filter(node => node.parent_menu_id === 'dsh_settings').map(node => node.default_name)).toEqual(['模型', '思考深度']);
+    expect(nodes.filter(node => node.parent_menu_id === 'dsh_settings').map(node => node.default_name)).toEqual(['模型', '思考深度', '权限模式']);
     expect(new Set(nodes.filter(node => node.menu_content_type === 2).map(node => botMenuCommand(node.event_key))))
-      .toEqual(new Set(['/new', '/sessions', '/model', '/thinking']));
+      .toEqual(new Set(['/new', '/sessions', '/model', '/thinking', '/permission']));
+    // Both documented limits: at most five per level and ten in all.
+    expect(top.length).toBeLessThanOrEqual(5);
+    expect(nodes.filter(node => node.parent_menu_id === 'dsh_settings').length).toBeLessThanOrEqual(5);
+    expect(nodes.length).toBeLessThanOrEqual(10);
   });
 
   it('returns detached payloads so a preview edit cannot change later configuration', () => {
@@ -29,7 +33,7 @@ describe('native bot menu configuration', () => {
     first.bot.bot_menus.pop();
     const second = buildBotMenuAbility();
     expect(second.bot.bot_menus[0]!.event_key).toBe('dsh.new');
-    expect(second.bot.bot_menus).toHaveLength(5);
+    expect(second.bot.bot_menus).toHaveLength(6);
   });
 
   it('separates ability and subscription updates and declares the publication step', () => {

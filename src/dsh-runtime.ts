@@ -54,8 +54,10 @@ export type TurnStreamEvent =
   | {type: 'discard'}
   | {type: 'reasoning'; text: string}
   | {type: 'text'; text: string}
-  | {type: 'tool'; callId: string; name: string; detail?: string}
-  | {type: 'tool-done'; callId: string; ok: boolean};
+  // detail is what the call is about, as the App shows it; code marks a command, pattern or path.
+  | {type: 'tool'; callId: string; name: string; detail?: string; code?: boolean}
+  // exitCode is set when a command exited with a non-zero code.
+  | {type: 'tool-done'; callId: string; ok: boolean; exitCode?: number};
 
 export interface ApprovalPrompt {toolName: string; reason?: string; detail?: string}
 export interface UserQuestion {
@@ -69,7 +71,8 @@ export interface UserQuestion {
 export interface QuestionAnswer {id: string; selected: string[]; custom?: string}
 /** A host permission preset, such as read-only, workspace-write or full access. */
 export interface PermissionOption {id: string; name: string; description?: string}
-export interface PermissionState {current: string; options: PermissionOption[]}
+/** defaultPreset is the App's choice for new sessions, when it is one of the options. */
+export interface PermissionState {current: string; options: PermissionOption[]; defaultPreset?: string}
 
 /** One turn's channel hooks. A harness-mode session asks its owner through them. */
 export interface TurnObserver {
@@ -104,8 +107,18 @@ export interface RuntimeSession {
   cancel(): void;
   dispose(): Promise<void>;
   modelSelection?(): ModelSelection;
-  /** Call only after the bridge validates and durably saves the complete choice. */
+  /**
+   * Call only after the bridge validates and durably saves the complete choice.
+   * In a session that shares its model with the App it is recorded in the
+   * session itself, so checkpoint before confirming it.
+   */
   setModelSelection?(next: ModelSelection): void;
+  /**
+   * True when this session decides its model like the App's own sessions: its
+   * latest pick (from Feishu or the App), else its last request's model, else
+   * the host default. The App then shows and changes the same choice.
+   */
+  sharesModelSelection?: boolean;
   /** Harness sessions on a host with permission presets; undefined otherwise. */
   permissionState?(): PermissionState | undefined;
   /** Switch this session's permission preset, as the App's own selector does. */
@@ -165,15 +178,21 @@ function clip(value: string, limit: number): string {
   return points.length > limit ? points.slice(0, limit).join('') + '…' : points.join('');
 }
 
+// The App's order: a call's own title or description first, then what it acts on.
+const DETAIL_KEYS = ['title', 'description', 'objective', 'task', 'task_name', 'name', 'question', 'questions', 'prompt', 'message',
+  'command', 'cmd', 'queries', 'query', 'pattern', 'url', 'uri', 'file_path', 'path', 'target', 'action', 'status'];
+const CODE_KEYS = new Set(['command', 'cmd', 'pattern', 'file_path', 'path']);
 /** What a call is about, from well-known argument fields only; never the whole argument object. */
-function callDetail(args: string, limit: number): string | undefined {
+function callDetail(args: string, limit: number): {text: string; code: boolean} | undefined {
   let value: unknown;
   try { value = JSON.parse(args); } catch { return; }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-  for (const key of ['url', 'query', 'queries', 'command', 'path', 'file_path', 'pattern']) {
+  for (const key of DETAIL_KEYS) {
     const field = (value as Record<string, unknown>)[key];
-    const text = Array.isArray(field) ? field.filter((item): item is string => typeof item === 'string').join('、') : field;
-    if (typeof text === 'string' && text.trim()) return clip(text.replace(/\s+/g, ' '), limit);
+    const items = Array.isArray(field) ? field.map(item => typeof item === 'string' ? item
+      : item && typeof item === 'object' && typeof (item as {question?: unknown}).question === 'string' ? (item as {question: string}).question : undefined) : [field];
+    const text = items.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).join(', ');
+    if (text.trim()) return {text: clip(text.replace(/\s+/g, ' ').trim(), limit), code: CODE_KEYS.has(key)};
   }
 }
 
@@ -374,9 +393,47 @@ function permissionOptions(service: PermissionPresetService): PermissionOption[]
   return options;
 }
 
-/** Optional host service: explicit policy routes also work without it. */
+/** The App's default for new sessions, when the catalog names one of its own options. */
+function permissionDefault(service: PermissionPresetService, options: readonly PermissionOption[]): string | undefined {
+  let catalog: unknown;
+  try { catalog = service.catalog(); } catch { return; }
+  const value = catalog && typeof catalog === 'object' ? (catalog as {defaultPreset?: unknown}).defaultPreset : undefined;
+  return typeof value === 'string' && options.some(option => option.id === value) ? value : undefined;
+}
+
+/** Optional host service: explicit policy routes also work without it. saveSelection is what the App's selector calls. */
 interface DefaultModelService {
   currentSelection(): ModelSelection;
+  saveSelection?(next: ModelSelection): Promise<void>;
+}
+
+/** The App host's per-session model record. Older hosts have none, and keep a fixed route. */
+interface SessionProjections {stateOf(session: Session, key: string): unknown}
+function sessionProjections(ctx: Context): SessionProjections | undefined {
+  let service: Partial<SessionProjections> | undefined;
+  try { service = ctx.get('sessionProjections') as Partial<SessionProjections> | undefined; } catch { return; }
+  return typeof service?.stateOf === 'function' ? service as SessionProjections : undefined;
+}
+/**
+ * The model a session's next request uses under the App's own rule: its latest
+ * pick, else its last request's model (an effort the adapter filled in stays
+ * unset), else the host default. Undefined when the host keeps no such record.
+ */
+function sessionChoice(projections: SessionProjections, session: Session, defaults: DefaultModelService | undefined): NonNullable<ModelSelectionRef['current']> | undefined {
+  try {
+    const state = projections.stateOf(session, 'modelSelection') as {pending?: unknown} | undefined;
+    if (!state || typeof state !== 'object') return;
+    if (state.pending) return nativeSelection(modelSelection(state.pending));
+    const header = (session as unknown as {requestHeader?: () => {config?: {provider?: unknown; model?: unknown; reasoningEffort?: unknown}; adapterDefaults?: {reasoningEffort?: unknown}} | undefined})
+      .requestHeader?.();
+    if (header?.config) {
+      const {provider, model, reasoningEffort} = header.config;
+      return nativeSelection(modelSelection({provider, model,
+        ...(reasoningEffort === undefined || header.adapterDefaults?.reasoningEffort === true ? {} : {reasoningEffort: String(reasoningEffort)})}));
+    }
+    const fallback = defaults?.currentSelection();
+    return fallback ? nativeSelection(modelSelection(fallback)) : undefined;
+  } catch { return; }
 }
 
 type ModelService = Pick<LlmRuntime, 'listProviders' | 'listModels' | 'resolveModelInfo' | 'resolveCallConfig'>;
@@ -636,6 +693,19 @@ export class DshRuntime {
     return service ? permissionOptions(service) : [];
   }
 
+  /** Whether harness sessions here share their model choice with the App (see RuntimeSession.sharesModelSelection). */
+  sharesModelSelection(): boolean {
+    return Boolean(sessionProjections(this.ctx)) && typeof (this.ctx.get('agentDefaultModel') as DefaultModelService | undefined)?.saveSelection === 'function';
+  }
+
+  /** Make a choice the App's default for new sessions, as the App's own model selector does. */
+  async saveDefaultModel(selection: ModelSelection): Promise<void> {
+    const service = this.ctx.get('agentDefaultModel') as DefaultModelService | undefined;
+    if (typeof service?.saveSelection !== 'function') return;
+    try { await service.saveSelection(nativeSelection(modelSelection(selection))); }
+    catch { throw new DshRuntimeError('MODEL_UNAVAILABLE'); }
+  }
+
   /** The preset a stored session runs on: its current projection, else its header. */
   private recordedPreset(session: unknown): string | undefined {
     const projections = this.ctx.get('sessionProjections') as {stateOf?(session: unknown, name: string): unknown} | undefined;
@@ -661,7 +731,17 @@ export class DshRuntime {
     let memoryText = '';
     let artifactsText = '';
     let active: ActiveTurn | undefined;
-    const selected: ModelSelectionRef = {current: undefined, assembled: undefined};
+    // A restricted session, or one on an administrator's fixed route, keeps that route.
+    // A harness session on the App host follows its own record once it exists (see sharesModelSelection).
+    const projections = harness && !(policy.provider && policy.model) ? sessionProjections(this.ctx) : undefined;
+    const defaultModel = projections ? this.ctx.get('agentDefaultModel') as DefaultModelService | undefined : undefined;
+    let fixed: ModelSelectionRef['current'];
+    let shared: Session | undefined;
+    const selected: ModelSelectionRef = {
+      get current() { return (shared && projections && sessionChoice(projections, shared, defaultModel)) || fixed; },
+      set current(next) { fixed = next; },
+      assembled: undefined,
+    };
     let handle: AgentHandle;
     // Legacy hosts log raw chunks as session events, modern hosts publish live
     // frames. Use whichever arrives first so a host offering both shows text once.
@@ -685,8 +765,8 @@ export class DshRuntime {
       const args = typeof block.arguments === 'string' ? block.arguments : '';
       // Kept only so an approval prompt can show the exact call being decided.
       if (turn.calls.size < 256) turn.calls.set(block.id, args);
-      const detail = callDetail(args, 120);
-      emit(turn, {type: 'tool', callId: block.id, name: clip(block.name, 64), ...(detail ? {detail} : {})});
+      const detail = callDetail(args, 160);
+      emit(turn, {type: 'tool', callId: block.id, name: clip(block.name, 64), ...(detail ? {detail: detail.text, ...(detail.code ? {code: true} : {})} : {})});
     };
     try {
       if (!isAbsolute(policy.cwd)) throw new Error('An absolute cwd is required');
@@ -837,7 +917,11 @@ export class DshRuntime {
               }
             });
             agentCtx.on('tools/result', (execution, result) => {
-              if (active && typeof execution.callId === 'string') emit(active, {type: 'tool-done', callId: execution.callId, ok: !result.isError});
+              if (!active || typeof execution.callId !== 'string') return;
+              // A command that ran but exited non-zero still succeeded as a tool call; show its code like the App.
+              const exitCode = (result as {value?: {exitCode?: unknown}}).value?.exitCode;
+              emit(active, {type: 'tool-done', callId: execution.callId, ok: !result.isError,
+                ...(typeof exitCode === 'number' && Number.isInteger(exitCode) && exitCode !== 0 ? {exitCode} : {})});
             });
           } else {
             tools.guard((execution) => allowed.has(execution.name) ? undefined : '此用户未获准使用该工具。');
@@ -900,6 +984,7 @@ export class DshRuntime {
     }
 
     const agent = handle.agent;
+    if (projections && sessionChoice(projections, agent.session, defaultModel)) shared = agent.session;
     // Keep this capability while the owner is active. Cordis unloads sibling
     // effects concurrently, so native agent teardown may detach this session
     // before the bridge's teardown reaches it.
@@ -1013,15 +1098,24 @@ export class DshRuntime {
       setModelSelection(next) {
         if (disposed) throw new DshRuntimeError('DISPOSED');
         if (active || agent.status === 'running') throw new DshRuntimeError('BUSY');
-        selected.current = nativeSelection(modelSelection(next));
+        const choice = nativeSelection(modelSelection(next));
+        if (!shared) { selected.current = choice; return; }
+        // Recorded like the App selector's own pick, so the App shows it as this session's model.
+        // Older SDK typings predate this event; only a host with the record gets here.
+        try {
+          (agent.session as unknown as {append(type: string, data: unknown): unknown}).append('model/selection', {provider: choice.provider, model: choice.model,
+            ...(choice.reasoningEffort === undefined ? {} : {reasoningEffort: String(choice.reasoningEffort)})});
+        } catch { throw new DshRuntimeError('INVALID_MODEL_SELECTION'); }
       },
+      sharesModelSelection: Boolean(shared),
       permissionState: () => {
         const service = harness && !disposed ? permissionPresets(this.ctx) : undefined;
         const options = service ? permissionOptions(service) : [];
         if (!service || !options.length) return;
         let current: unknown;
         try { current = service.current(agent.session); } catch { return; }
-        return {current: typeof current === 'string' ? current : 'custom', options};
+        const defaultPreset = permissionDefault(service, options);
+        return {current: typeof current === 'string' ? current : 'custom', options, ...(defaultPreset ? {defaultPreset} : {})};
       },
       setPermission: (id) => {
         if (disposed) throw new DshRuntimeError('DISPOSED');

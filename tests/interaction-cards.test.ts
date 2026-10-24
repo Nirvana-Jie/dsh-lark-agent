@@ -13,9 +13,21 @@ describe('approval and question cards', () => {
     const text = JSON.stringify(asked);
     expect(text).toContain('````\\necho ```nested```\\n````');
     expect(text).toContain('allow-token');
-    const settled = JSON.stringify(approvalCard({toolName: 'bash'}, undefined, '已拒绝，这次不会执行。'));
-    expect(settled).not.toContain('token');
+    const settled = JSON.stringify(approvalCard({toolName: 'bash'}, undefined, {text: '已拒绝，这次不会执行。', tone: 'error'}));
+    expect(settled).not.toContain('allow-token');
+    expect(settled).not.toContain('"behaviors"');
     expect(settled).toContain('已拒绝，这次不会执行。');
+  });
+
+  it('colours a settled card by its outcome', () => {
+    const header = (payload: ReturnType<typeof approvalCard>) => payload.kind === 'card' ? (payload.card.header as {template: string}).template : undefined;
+    expect(header(approvalCard({toolName: 'bash'}, {allow: 'a', deny: 'd'}))).toBe('blue');
+    expect(header(approvalCard({toolName: 'bash'}, undefined, {text: '已允许这一次。', tone: 'success'}))).toBe('green');
+    expect(header(approvalCard({toolName: 'bash'}, undefined, {text: '已拒绝，这次不会执行。', tone: 'error'}))).toBe('red');
+    expect(header(approvalCard({toolName: 'bash'}, undefined, {text: '5 分钟内没有确认，已按拒绝处理。', tone: 'muted'}))).toBe('grey');
+    const answered = questionCard([single], undefined, {text: '已回答：Fast', tone: 'success'});
+    expect(answered.kind === 'card' && (answered.card.header as {template: string}).template).toBe('green');
+    expect(JSON.stringify(answered)).toContain('已回答：Fast');
   });
 
   it('uses buttons only for one short single choice', () => {

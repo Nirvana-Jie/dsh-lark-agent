@@ -16,7 +16,7 @@ dsh-lark-agent adds a Feishu / Lark private chat to a running DeepSeek Harness: 
 
 Before you start:
 
-- DeepSeek Harness is running, can chat, and has a default model selected: PC App `0.2.1-rc.2`, or Web / `dsh` CLI `0.1.1-rc.2`.
+- DeepSeek Harness is running, can chat, and has a default model selected: PC App `0.2.1-rc.3` (`0.2.1-rc.2` also works), or Web / `dsh` CLI `0.1.1-rc.2`.
 - The official Lark CLI is installed on the same machine **before** you enable the plugin (needs Node.js / npm):
 
   ```sh
@@ -72,24 +72,24 @@ The Feishu entry works only while the host is online: not when the app is closed
 
 | In Feishu, you… | The assistant… |
 | --- | --- |
-| Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card, with its thinking and tool steps folded inside |
+| Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card; its thinking and tool steps are folded inside, step by step as in the app, and the card ends with the model, thinking depth and permission mode it used |
 | Ask for something that needs your OK | Sends a confirmation card: tap **允许一次** (allow once) or **拒绝** (deny); no answer within 5 minutes means it won't run |
 | Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
-| Use `/permission`, or 权限模式 in the model settings card | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking |
+| Use `/permission`, or **设置 → 权限模式** (Settings → Permission mode) in the bottom menu | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking. The card you tap updates in place and turns green when done |
 | Ask for the result file | Sends files from its workspace straight to the chat |
 | Say "lead with the conclusion from now on" | Remembers the preference |
 | Keep chatting, or use `/sessions`, `/new` | Continues the topic, returns to an earlier one, or starts fresh |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |
 | Ask it to let you pick between options first | Sends a form card and continues once you submit |
-| Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2`, opening that Feishu session in the app also shows a local preview |
-| Use `/model`, `/thinking` | Switches between the host's configured models and thinking depth |
+| Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2` / `rc.3`, opening that Feishu session in the app also shows a local preview |
+| Use `/model`, `/thinking` | Switches between the host's configured models and thinking depth, in sync with Harness on your computer (App `0.2.1-rc.2` / `rc.3`) |
 
 By default it answers only your own private chat. In that chat the assistant is your Harness itself: the tools it can use and the actions that need your confirmation follow the permission settings on your computer. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
 
 ## Good to know
 
 - **More docs**: commands, privacy, upgrades, the chat bottom menu, team deployment and troubleshooting are in [DEVELOPMENT.md](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md) (Chinese).
-- **Compatibility**: verified with PC App `0.2.1-rc.2` and `dsh` CLI / Web `0.1.1-rc.2`; other versions, platforms and tenants are not yet verified.
+- **Compatibility**: fully verified with PC App `0.2.1-rc.2` and `dsh` CLI / Web `0.1.1-rc.2`. PC App `0.2.1-rc.3` passes the real-host contract tests, and the plugin loads and connects on it (first-time QR setup on rc.3 is not tested yet). Other versions, platforms and tenants are not yet verified.
 - **Language**: the settings page, the bot's built-in messages (`/help`, status text, card buttons, bottom menu) and the intro video are in Chinese.
 
 ## License

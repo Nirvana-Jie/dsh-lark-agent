@@ -10,12 +10,20 @@ export interface ReplyAction {
   value: Record<string, string>;
   primary?: boolean;
   confirm?: {title: string; text: string};
+  /** Shown but not clickable, such as the current choice or every option while a switch runs. */
+  disabled?: boolean;
 }
+
+/** normal: blue; pending: a switch is running; success: green; error: red; muted: closed or expired. */
+export type PanelTone = 'normal' | 'pending' | 'success' | 'error' | 'muted';
 
 export interface ReplyPanel {
   title: string;
   summary: string;
   subtitle?: string;
+  tone?: PanelTone;
+  /** One highlighted line under the header: the current choice, a running switch, or its result. */
+  status?: {text: string; tone?: PanelTone};
   metrics?: {label: string; value: string; note?: string}[];
   sections: {title?: string; text: string; collapsible?: boolean}[];
   actions?: ReplyAction[];
@@ -171,16 +179,28 @@ const column = (elements: Record<string, unknown>[], extra: Record<string, unkno
   tag: 'column', width: 'weighted', weight: 1, direction: 'vertical',
   vertical_spacing: '4px', padding: '0px', margin: '0px', elements, ...extra,
 });
+const TONES: Record<PanelTone, {header: string; background: string; icon: string; color: string}> = {
+  normal: {header: 'blue', background: 'grey-50', icon: 'info_outlined', color: 'grey'},
+  pending: {header: 'wathet', background: 'blue-50', icon: 'loading_outlined', color: 'blue'},
+  success: {header: 'green', background: 'green-50', icon: 'done_outlined', color: 'green'},
+  error: {header: 'red', background: 'red-50', icon: 'warning_outlined', color: 'red'},
+  muted: {header: 'grey', background: 'grey-50', icon: 'time_outlined', color: 'grey'},
+};
 
 /** Trusted application panels only. Model strings never choose components or callback values. */
 export function renderPanel(panel: ReplyPanel): ReplyPayload {
   const metrics = (panel.metrics ?? []).filter(metric => metric.label.trim() || metric.value.trim());
-  const fallbackText = safePlainText([panel.title, panel.subtitle,
+  const fallbackText = safePlainText([panel.title, panel.subtitle, panel.status?.text,
     ...metrics.map(metric => [`${metric.label}：${metric.value}`, metric.note].filter(Boolean).join('\n')),
     ...panel.sections.map(section => [section.title, section.text].filter(Boolean).join('\n')), panel.note]
     .filter(Boolean).join('\n\n'));
   const elements: Record<string, unknown>[] = [];
   const actions = panel.actions ?? [];
+  if (panel.status?.text.trim()) {
+    const tone = TONES[panel.status.tone ?? 'normal'];
+    elements.push({tag: 'column_set', flex_mode: 'none', margin: '0px', columns: [column([{...md(panel.status.text),
+      icon: {tag: 'standard_icon', token: tone.icon, color: tone.color}}], {background_style: tone.background, padding: '8px 12px 8px 12px'})]});
+  }
   for (let start = 0; start < metrics.length; start += 2) {
     elements.push({tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '0px',
       columns: metrics.slice(start, start + 2).map(metric => column([
@@ -219,8 +239,8 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
   for (let start = 0; start < actions.length; start += actionColumns) {
     elements.push({tag: 'column_set', flex_mode: panel.actionColumns ? 'none' : 'flow', horizontal_spacing: '8px', margin: '0px', columns: actions.slice(start, start + actionColumns).map(action => column([
       {tag: 'button', text: title(plainLabel(action.label, panel.actionColumns === 1 ? 64 : 24)), type: action.primary ? 'primary' : 'default', width: 'fill', margin: '0px',
-        behaviors: [{type: 'callback', value: {...action.value}}],
-        ...(action.confirm ? {
+        ...(action.disabled ? {disabled: true} : {behaviors: [{type: 'callback', value: {...action.value}}]}),
+        ...(action.confirm && !action.disabled ? {
           icon: {tag: 'standard_icon', token: 'warning_outlined'},
           confirm: {title: title(plainLabel(action.confirm.title, 80)), text: title(plainLabel(action.confirm.text, 300))},
         } : {}),
@@ -233,9 +253,10 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
   if (Array.from(summary).length < 8) return {kind: 'text', text: fallbackText};
   const card: Record<string, unknown> = {
     schema: '2.0',
-    config: {compact_width: false, width_mode: 'default', enable_forward: false, enable_forward_interaction: false,
+    // Shared from the start, so a click can update this same card in place.
+    config: {update_multi: true, compact_width: false, width_mode: 'default', enable_forward: false, enable_forward_interaction: false,
       enable_markdown_autolink: false, summary: {content: summary}},
-    header: {template: 'blue', title: title(plainLabel(panel.title, 80)), padding: '10px 16px 10px 16px',
+    header: {template: TONES[panel.tone ?? 'normal'].header, title: title(plainLabel(panel.title, 80)), padding: '10px 16px 10px 16px',
       ...(panel.subtitle?.trim() ? {subtitle: title(safePlainText(panel.subtitle)), vertical_spacing: '4px'} : {})},
     body: {direction: 'vertical', vertical_spacing: '8px', padding: '12px 16px 12px 16px', elements},
   };

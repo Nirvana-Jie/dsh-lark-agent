@@ -139,6 +139,55 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     }
   });
 
+  it('shares a harness session model with the App through the real session record', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-modern-model-'));
+    const hosts: Array<Awaited<ReturnType<typeof createHost>>> = [];
+    // What the App host adds: its per-session model record and the default its selector saves.
+    const appHost = async () => {
+      const host = await createHost(directory); hosts.push(host);
+      const projection = await load('node_modules/@deepseek-ai/dsh-api-session-controller/lib/types/model-selection-projection.js');
+      projection.installModelSelectionProjection(host.root);
+      const saved: unknown[] = [];
+      const fiber = host.root.plugin({name: 'test-default-model', apply(ctx: {provide(name: string, value: unknown): void}) {
+        ctx.provide('agentDefaultModel', {currentSelection: () => ({provider: 'offline', model: 'offline'}), saveSelection: async (next: unknown) => { saved.push(next); }});
+      }});
+      await fiber.await();
+      return {host, saved};
+    };
+    const policy = {cwd: '/tmp/lark-modern-owner', allowedTools: [], mode: 'harness' as const, memory: ownerMemory()};
+    const picks = (agent: {session: {snapshotEvents(): Array<{type: string; data: unknown}>}}) =>
+      agent.session.snapshotEvents().filter(event => event.type === 'model/selection').map(event => event.data);
+    try {
+      const {host, saved} = await appHost();
+      expect(host.adapter.sharesModelSelection()).toBe(true);
+      const session = await host.adapter.create(policy);
+      expect(session.sharesModelSelection).toBe(true);
+      expect(session.modelSelection()).toEqual({provider: 'offline', model: 'offline'});
+      const agent = host.root.get('agents').get(session.id);
+      session.setModelSelection({provider: 'offline', model: 'offline', reasoningEffort: 'high'});
+      expect(picks(agent)).toEqual([{provider: 'offline', model: 'offline', reasoningEffort: 'high'}]);
+      expect(session.modelSelection()).toEqual({provider: 'offline', model: 'offline', reasoningEffort: 'high'});
+      // A pick made in the App on this session is recorded the same way and routes the next request.
+      agent.session.append('model/selection', {provider: 'offline', model: 'app-pick'});
+      expect(session.modelSelection()).toEqual({provider: 'offline', model: 'app-pick'});
+      expect(await session.run('which model', new AbortController().signal)).toBe('offline answer');
+      expect(JSON.stringify(host.requests.at(-1))).toContain('app-pick');
+      await host.adapter.saveDefaultModel({provider: 'offline', model: 'app-pick'});
+      expect(saved).toEqual([{provider: 'offline', model: 'app-pick'}]);
+      await session.checkpoint();
+      await session.dispose();
+      await host.close();
+      // After a restart the session resumes on its own record, not on the host default.
+      const restarted = await appHost();
+      const resumed = await restarted.host.adapter.resume(policy, session.id);
+      expect(resumed.modelSelection()).toEqual({provider: 'offline', model: 'app-pick'});
+      await resumed.dispose();
+    } finally {
+      for (const host of hosts) await host.close().catch(() => undefined);
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
   it('answers real host approvals and questions only for its own active harness turn', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'lark-modern-relay-'));
     const host = await createHost(directory, true);

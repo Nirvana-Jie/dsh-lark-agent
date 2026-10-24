@@ -6,7 +6,6 @@ export const BOT_MENU_COMMANDS = Object.freeze({
   'dsh.sessions': '/sessions',
   'dsh.model': '/model',
   'dsh.thinking': '/thinking',
-  // Optional: not in the default five-node menu; an owner may add it under 设置.
   'dsh.permission': '/permission',
 } as const);
 export type BotMenuCommand = (typeof BOT_MENU_COMMANDS)[keyof typeof BOT_MENU_COMMANDS];
@@ -27,7 +26,8 @@ export interface BotMenuNode {
 
 /**
  * Public Application Ability PATCH payload. Publishing is a separate admin action.
- * Five flat nodes fit both documented floating-menu limit variants.
+ * Three top-level nodes with three children fit both documented floating-menu
+ * limit variants (at most five per level and ten in all).
  * Text actions cannot separate a friendly label from the text they send.
  */
 export function buildBotMenuAbility(): {bot: {
@@ -42,6 +42,7 @@ export function buildBotMenuAbility(): {bot: {
     {menu_id: 'dsh_settings', sort: 2, default_name: '设置', menu_content_type: 3},
     {menu_id: 'dsh_model', parent_menu_id: 'dsh_settings', sort: 0, default_name: '模型', menu_content_type: 2, event_key: 'dsh.model'},
     {menu_id: 'dsh_thinking', parent_menu_id: 'dsh_settings', sort: 1, default_name: '思考深度', menu_content_type: 2, event_key: 'dsh.thinking'},
+    {menu_id: 'dsh_permission', parent_menu_id: 'dsh_settings', sort: 2, default_name: '权限模式', menu_content_type: 2, event_key: 'dsh.permission'},
   ]}};
 }
 

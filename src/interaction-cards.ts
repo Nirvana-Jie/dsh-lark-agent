@@ -1,8 +1,10 @@
 import type {ApprovalPrompt, QuestionAnswer, UserQuestion} from './dsh-runtime.js';
-import {cardMarkdown, renderPanel, safePlainText, type ReplyPayload} from './replies.js';
+import {cardMarkdown, renderPanel, safePlainText, type PanelTone, type ReplyPayload} from './replies.js';
 
 /** A verified card click on a pending approval or question. */
 export interface InteractionAnswer {verb: 'approve' | 'deny' | 'choose' | 'reply'; index?: number; formValues?: unknown}
+/** How a card closed: allowed or answered (success), refused (error), or expired and stopped (muted). */
+export interface InteractionOutcome {text: string; tone: PanelTone}
 
 const code = (value: string) => '`' + value.replace(/`/g, 'ˋ') + '`';
 /** A fence longer than any backtick run inside keeps the arguments one code block. */
@@ -18,15 +20,15 @@ export function simpleQuestion(questions: readonly UserQuestion[]): boolean {
 }
 
 /** The decision card. Without tokens it shows the settled outcome and no buttons. */
-export function approvalCard(prompt: ApprovalPrompt, tokens?: {allow: string; deny: string}, outcome?: string): ReplyPayload {
+export function approvalCard(prompt: ApprovalPrompt, tokens?: {allow: string; deny: string}, outcome?: InteractionOutcome): ReplyPayload {
   return renderPanel({
     title: tokens ? '需要你确认' : '确认结果',
-    summary: `是否允许使用工具 ${prompt.toolName}`,
+    summary: outcome?.text ?? `是否允许使用工具 ${prompt.toolName}`,
+    ...(outcome ? {tone: outcome.tone, status: outcome} : {}),
     sections: [
       {title: '工具', text: code(prompt.toolName)},
       ...(prompt.reason ? [{title: '原因', text: prompt.reason}] : []),
       ...(prompt.detail ? [{title: '参数', text: fenced(prompt.detail)}] : []),
-      ...(outcome ? [{text: `**${outcome}**`}] : []),
     ],
     ...(tokens ? {actions: [{label: '允许一次', value: {token: tokens.allow}, primary: true}, {label: '拒绝', value: {token: tokens.deny}}],
       actionColumns: 2 as const, note: '只允许这一次，不改变电脑上的权限设置。5 分钟内没有确认会按拒绝处理。'} : {}),
@@ -40,16 +42,16 @@ function questionText(question: UserQuestion): string {
 }
 
 /** A question card: buttons for one short choice, otherwise a form. Without tokens it shows the outcome. */
-export function questionCard(questions: readonly UserQuestion[], tokens?: {choose?: string[]; reply?: string}, outcome?: string): ReplyPayload {
+export function questionCard(questions: readonly UserQuestion[], tokens?: {choose?: string[]; reply?: string}, outcome?: InteractionOutcome): ReplyPayload {
   const first = questions[0]!;
   const title = questions.length === 1 && first.header ? first.header : '需要你选择';
   const form = Boolean(tokens?.reply);
   const base = renderPanel({
-    title, summary: `${title}：${first.question}`,
+    title, summary: outcome?.text ?? `${title}：${first.question}`,
+    ...(outcome ? {tone: outcome.tone, status: outcome} : {}),
     sections: [
       ...(form ? [{text: questions.length > 1 ? `请回答下面 ${questions.length} 个问题，然后提交。` : '请选择或填写后提交。'}]
         : questions.map(question => ({text: questionText(question)}))),
-      ...(outcome ? [{text: `**${outcome}**`}] : []),
     ],
     ...(tokens?.choose ? {actions: [...first.options.map((option, index) => ({label: option.label, value: {token: tokens.choose![index]!}, primary: index === 0})),
       {label: '跳过', value: {token: tokens.choose[first.options.length]!}}], actionColumns: 1 as const} : {}),
