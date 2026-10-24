@@ -320,6 +320,24 @@ interface ChannelContext {
   on(event: 'agent/assistant-stream', handler: (payload: {agent?: {session?: unknown}; frame?: unknown} | undefined) => void): unknown;
 }
 
+/**
+ * Optional host service. The App composes each session from an agent preset
+ * (its tools, skills and prompt sections); a rosterless host has none.
+ */
+interface PresetService {
+  resolve(id?: string): Promise<{id?: unknown}>;
+  mount(agentCtx: Context, id?: string): Promise<unknown>;
+}
+function agentPresets(ctx: Context): PresetService | undefined {
+  const service = ctx.get('agentPresets') as Partial<PresetService> | undefined;
+  return typeof service?.resolve === 'function' && typeof service.mount === 'function' ? service as PresetService : undefined;
+}
+async function presetIdOf(presets: PresetService, requested?: string): Promise<string> {
+  const id = (await presets.resolve(requested))?.id;
+  if (typeof id !== 'string' || !id) throw new Error('The host returned an invalid agent preset');
+  return id;
+}
+
 /** Optional host service: explicit policy routes also work without it. */
 interface DefaultModelService {
   currentSelection(): ModelSelection;
@@ -576,6 +594,17 @@ export class DshRuntime {
     return this.build(policy);
   }
 
+  /** The preset a stored session runs on: its current projection, else its header. */
+  private recordedPreset(session: unknown): string | undefined {
+    const projections = this.ctx.get('sessionProjections') as {stateOf?(session: unknown, name: string): unknown} | undefined;
+    let projected: unknown;
+    try { projected = typeof projections?.stateOf === 'function' ? projections.stateOf(session, 'agentPreset') : undefined; }
+    catch { projected = undefined; }
+    if (typeof projected === 'string' && projected) return projected;
+    const header = (session as {header?: {agentPreset?: unknown}} | undefined)?.header?.agentPreset;
+    return typeof header === 'string' && header ? header : undefined;
+  }
+
   async resume(policy: AgentPolicy, sessionId: string): Promise<RuntimeSession> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) throw new DshRuntimeError('RESTORE_FAILED');
     return this.build(policy, sessionId);
@@ -638,13 +667,21 @@ export class DshRuntime {
         choice = await modelRead(signal => this.effectiveSelection(choice, llm, signal));
       }
       selected.current = nativeSelection(choice);
-      const setup = (agentCtx: Context, setupAgent?: AgentHandle['agent']) => {
+      // A harness session is composed like the App's own: the host's agent
+      // preset supplies its tools, skills and prompt sections. A new session
+      // records the default; a restricted session never joins a preset.
+      const presets = harness ? agentPresets(this.ctx) : undefined;
+      let presetId = presets && !resumeId ? await presetIdOf(presets) : undefined;
+      const setup = async (agentCtx: Context, setupAgent?: AgentHandle['agent']) => {
           // Modern hosts pass the prepared Agent explicitly; legacy hosts expose
           // it on the scoped context. Never substitute a global/current agent.
           if (resumeId) {
             const preparedAgent = setupAgent ?? agentCtx.agent;
             if (preparedAgent?.session.header.cwd !== policy.cwd) throw new Error('Persisted workspace does not match current user policy');
+            // Like the App, a session without a recorded preset resumes on the default.
+            if (presets) presetId ??= await presetIdOf(presets, this.recordedPreset(preparedAgent?.session));
           }
+          if (presets && presetId) await presets.mount(agentCtx, presetId);
           const tools = agentCtx.get('tools') as ToolRuntime | undefined;
           if (!tools || typeof tools.presentAs !== 'function' || typeof tools.restrict !== 'function' || typeof tools.guard !== 'function') {
             throw new Error('The host does not support scoped tool restrictions');
@@ -794,17 +831,21 @@ export class DshRuntime {
             events = structuredClone(events);
           } finally {await reader.close();}
           const boundary = events.length - 1;
+          if (presets) {
+            const recorded = (reader.header as {agentPreset?: unknown}).agentPreset;
+            presetId ??= await presetIdOf(presets, typeof recorded === 'string' && recorded ? recorded : undefined);
+          }
           const forkOptions = {
             sessionId: SessionId(randomUUID()), seed: modernFork.buildForkSeed(events, boundary),
             inheritedEventCount: boundary + 1,
-            meta: {cwd: policy.cwd, parentSession: SessionId(resumeId), isSeeded: true},
+            meta: {cwd: policy.cwd, parentSession: SessionId(resumeId), isSeeded: true, ...(presetId ? {agentPreset: presetId} : {})},
             agentOptions: {provider, model}, setup,
           };
           handle = await this.ctx.agents.create(forkOptions);
         }
       } else {
         handle = await this.ctx.agents.create({
-          sessionId: SessionId(randomUUID()), meta: {cwd: policy.cwd}, agentOptions: {provider, model}, setup,
+          sessionId: SessionId(randomUUID()), meta: {cwd: policy.cwd, ...(presetId ? {agentPreset: presetId} : {})}, agentOptions: {provider, model}, setup,
           // An explicit empty seed emits a non-conversational end-seed event.
           // This makes checkpoint() materialize a new empty native log before
           // the bridge publishes its persistent ownership/catalog reference.

@@ -1216,3 +1216,58 @@ describe('harness channel mode', () => {
     expect(next).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('harness sessions use the host agent preset', () => {
+  const ownerMemory = (): MemoryAccess => ({privateChat: true, list: vi.fn(async () => []), search: vi.fn(async () => []),
+    remember: vi.fn(async () => { throw new Error('unused'); }), forget: vi.fn(async () => false)});
+  const withPresets = (f: ReturnType<typeof fixture>) => {
+    const presets = {resolve: vi.fn(async (id?: string) => ({id: id ?? 'standard'})), mount: vi.fn(async (_ctx: Context, id?: string) => ({id}))};
+    const original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(name => name === 'agentPresets' ? presets : original(name));
+    return presets;
+  };
+
+  it('records the default preset on a new session and mounts it before adding the channel section', async () => {
+    const f = fixture();
+    const presets = withPresets(f);
+    await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    expect(presets.resolve).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(f.create.mock.calls[0]![0].meta).toEqual({cwd: basePolicy.cwd, agentPreset: 'standard'});
+    expect(presets.mount).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'standard');
+    expect(presets.mount.mock.invocationCallOrder[0]!).toBeLessThan(f.prompt.section.mock.invocationCallOrder[0]!);
+  });
+
+  it('resumes on the recorded preset, and on the default when none was recorded, like the App', async () => {
+    const recorded = fixture();
+    const presets = withPresets(recorded);
+    Object.assign(recorded.session.header, {agentPreset: 'coder'});
+    await recorded.runtime.resume({...basePolicy, mode: 'harness', memory: ownerMemory()}, '00000000-0000-4000-8000-000000000000');
+    expect(presets.resolve).toHaveBeenCalledExactlyOnceWith('coder');
+    expect(presets.mount).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'coder');
+
+    const unrecorded = fixture();
+    const defaults = withPresets(unrecorded);
+    await unrecorded.runtime.resume({...basePolicy, mode: 'harness', memory: ownerMemory()}, '00000000-0000-4000-8000-000000000000');
+    expect(defaults.resolve).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(defaults.mount).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'standard');
+  });
+
+  it('never joins a preset for a restricted session', async () => {
+    const f = fixture();
+    const presets = withPresets(f);
+    await f.runtime.create(basePolicy);
+    expect(presets.resolve).not.toHaveBeenCalled();
+    expect(presets.mount).not.toHaveBeenCalled();
+    expect(f.create.mock.calls[0]![0].meta).toEqual({cwd: basePolicy.cwd});
+  });
+
+  it('fails closed when the preset cannot be resolved or mounted', async () => {
+    const broken = fixture();
+    withPresets(broken).mount.mockRejectedValue(new Error('broken preset'));
+    await expect(broken.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()})).rejects.toMatchObject({code: 'SETUP_FAILED'});
+    const invalid = fixture();
+    withPresets(invalid).resolve.mockResolvedValue({id: ''});
+    await expect(invalid.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()})).rejects.toMatchObject({code: 'SETUP_FAILED'});
+    expect(invalid.create).not.toHaveBeenCalled();
+  });
+});
