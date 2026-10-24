@@ -7,6 +7,7 @@ import {acquireLock} from '../src/lock.js';
 import {applyOnboarding, registerConnectionRpc} from '../src/onboarding/host.js';
 import {ConnectionController, SetupError, officialDestination} from '../src/onboarding/controller.js';
 import type {ConnectionResult} from '../src/onboarding/protocol.js';
+import type {Release} from '../src/onboarding/updates.js';
 
 type Handler = (endpoint: string, payload: unknown, signal: AbortSignal,
   peer?: {principal?: {kind?: string}}) => Promise<ConnectionResult<unknown>>;
@@ -112,19 +113,19 @@ describe('upgrade notice in the settings snapshot', () => {
         get: (name: string) => name === 'connection' ? {rpc: {handle(_channel: string, callback: Handler) {handler = callback; return async () => undefined;}}} : undefined,
         effect: (factory: () => () => Promise<void>) => {effects.push(factory);},
       };
-      let answer!: (value: string) => void;
-      const latestVersion = vi.fn(() => new Promise<string | undefined>(resolve => {answer = resolve;}));
-      await applyOnboarding(ctx as unknown as Context, {dataDir, executable: '/nonexistent/lark-cli', latestVersion});
+      let answer!: (value: Release) => void;
+      const latestRelease = vi.fn(() => new Promise<Release | undefined>(resolve => {answer = resolve;}));
+      await applyOnboarding(ctx as unknown as Context, {dataDir, executable: '/nonexistent/lark-cli', latestRelease});
       const signal = new AbortController().signal;
       const first = await handler('status', {}, signal, owner) as {ok: true; value: Record<string, unknown>};
       expect(first.value).toMatchObject({phase: 'idle'});
       expect(first.value).not.toHaveProperty('update');
       const installed = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version as string;
-      answer('999.0.0');
+      answer({version: '999.0.0', publishedAt: 0});
       await vi.waitFor(async () => expect(await handler('status', {}, signal, owner)).toMatchObject({ok: true,
         value: {phase: 'idle', update: {current: installed, latest: '999.0.0'}}}));
       expect(await handler('cancel', {}, signal, owner)).toMatchObject({ok: true, value: {update: {latest: '999.0.0'}}});
-      expect(latestVersion).toHaveBeenCalledOnce();
+      expect(latestRelease).toHaveBeenCalledOnce();
       await effects[0]!()();
     } finally {
       await rm(dataDir, {recursive: true, force: true});

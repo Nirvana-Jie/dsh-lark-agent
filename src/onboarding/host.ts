@@ -11,7 +11,7 @@ import {ConnectionController, SetupError} from './controller.js';
 import {ConnectionStore} from './store.js';
 import {LarkPlatform} from './lark-platform.js';
 import type {ConnectionEndpoint, ConnectionResult, ConnectionSnapshot} from './protocol.js';
-import {npmLatest, UpdateCheck} from './updates.js';
+import {npmLatest, type Release, UpdateCheck} from './updates.js';
 
 interface Peer {principal?: {kind?: string}}
 interface RpcHost {
@@ -170,10 +170,10 @@ async function waitReady(service: BotService, signal: AbortSignal): Promise<void
 
 /**
  * Attach the control plane without requiring any user-written team configuration.
- * `latestVersion` replaces the npm lookup behind the upgrade notice (tests use it to stay offline).
+ * `latestRelease` replaces the npm lookup behind the upgrade notice (tests use it to stay offline).
  */
 export async function applyOnboarding(ctx: Context, options: {dataDir?: string; executable?: string;
-  latestVersion?: (signal: AbortSignal) => Promise<string | undefined>} = {}): Promise<void> {
+  latestRelease?: (signal: AbortSignal) => Promise<Release | undefined>} = {}): Promise<void> {
   const connection = ctx.get('connection') as {rpc: RpcHost; fetch?: OwnerFetchRoutes} | undefined;
   if (!connection?.rpc) throw new SetupError('请在 dsh Web 或桌面 App 中启用插件；后台部署可设置 DSH_LARK_CONFIG。');
   const family = checkRuntimeCompatibility(ctx).family;
@@ -211,7 +211,7 @@ export async function applyOnboarding(ctx: Context, options: {dataDir?: string; 
     },
   });
   const installed = installedPackage();
-  const updates = new UpdateCheck(installed?.version, options.latestVersion
+  const updates = new UpdateCheck(installed?.version, options.latestRelease
     ?? (signal => installed ? npmLatest(installed.name, signal) : Promise.resolve(undefined)));
   const control: ConnectionControl = {
     snapshot: () => withUpdate(controller.snapshot(), updates),
