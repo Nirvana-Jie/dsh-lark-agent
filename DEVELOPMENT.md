@@ -52,11 +52,9 @@
 ## 连接管理
 
 <details>
-<summary>安装与连接截图</summary>
+<summary>桌面版安装截图</summary>
 
 [12 秒入口回放（MP4）](assets/readme/desktop-install-steps.mp4) · [插件管理页](assets/readme/desktop-install-01.jpg) · [安装引导](assets/readme/desktop-install-03.jpg)
-
-<img src="assets/readme/onboarding-connected.jpg" width="720" alt="Harness Web 飞书设置页显示已连接">
 
 </details>
 

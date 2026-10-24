@@ -30,8 +30,6 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 
 在侧栏打开 **插件 → 添加插件**，填入 `dsh-lark-agent`，点「安装」，再点「立即启用」；需要时按提示重启。
 
-<img src="assets/readme/desktop-install-02.jpg" width="720" alt="DeepSeek Harness 桌面版的添加插件弹窗">
-
 ### 使用 `dsh` CLI 安装
 
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) 会调用 pnpm，需先装好 pnpm 并确保它在 PATH 中：
