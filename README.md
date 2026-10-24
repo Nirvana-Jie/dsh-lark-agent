@@ -30,8 +30,6 @@ Before you start:
 
 In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter `dsh-lark-agent`, click **安装** (Install), then **立即启用** (Enable now). Restart if the app asks.
 
-<img src="https://raw.githubusercontent.com/Nirvana-Jie/dsh-lark-agent/main/assets/readme/desktop-install-02.jpg" width="720" alt="The Add plugin dialog in the DeepSeek Harness desktop app">
-
 ### Install with the `dsh` CLI
 
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
