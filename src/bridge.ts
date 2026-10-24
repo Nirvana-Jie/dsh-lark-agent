@@ -93,9 +93,16 @@ const STOPPING_TEXT = '连接正在关闭，本次处理已停止。';
 const IN_PLACE = /^\/(?:(?:model|thinking)(?: (?:use [a-f0-9]{16}|page [0-9]{1,4}))?|permission(?: use [a-z][a-z0-9-]{0,39})?|sessions|new|resume [a-f0-9]{12})$/;
 // A switch that finishes sooner goes straight to its result, without a loading frame.
 const PANEL_PROGRESS_DELAY_MS = 150;
+const STALE_SETTINGS = '设置刚刚变化，已刷新为最新选项，请重新选择。';
+
+/** The card's model settings changed after it was drawn, so its choice is not applied. */
+class StaleCardError extends Error {
+  constructor() { super('模型设置已变化，请重新打开模型或思考深度菜单后操作。'); }
+}
 
 function commandError(error: unknown): string {
-  return error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError
+  return error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError
+    || error instanceof ModelPreferencesError || error instanceof StaleCardError
     ? error.message : '操作未完成，请稍后重试；尚未确认保存成功。';
 }
 
@@ -128,6 +135,8 @@ interface Lane {
   controller?: AbortController;
   /** The live session's permission preset as last seen here; a different value was changed in the App. */
   permissionSeen?: string;
+  /** Where this harness chat keeps its permission choice, so a change can be kept even while unloading. */
+  permissionContext?: {ownerKey: string; conversationKey: string};
 }
 const HELP = `直接把想做的事告诉我就好。
 
@@ -370,10 +379,14 @@ export class BotBridge {
       }
     }
     if (message.expectedModelRevision !== undefined) {
+      // A shared session may have been switched in the App after this card was drawn.
+      if (lane.session?.sharesModelSelection && !lane.unavailable) {
+        await this.mirrorModel(message, lane.session, await this.state.modelPreferences?.get(this.context(message)));
+      }
       const current = await this.state.modelPreferences?.get(this.context(message));
       if ((current?.revision ?? null) !== message.expectedModelRevision) {
-        if (inPlace) return this.refreshPanel(message, lane, '设置刚刚变化，已刷新为最新选项，请重新选择。');
-        return this.reply(message, '模型设置已变化，请重新打开模型或思考深度菜单后操作。');
+        if (inPlace) return this.refreshPanel(message, lane, STALE_SETTINGS);
+        return this.reply(message, new StaleCardError().message);
       }
     }
     if (this.state.artifacts && (/^\/(?:result|publish|answer) [a-f0-9]{12}$/.test(text) || text === '/results')) {
@@ -688,10 +701,13 @@ export class BotBridge {
       response = await this.command(message, lane);
       panel = await this.commandPanel(message, lane);
     } catch (error) {
-      failed = true;
-      response = commandError(error);
-      this.audit({stage: 'command-failed', messageId: message.messageId});
-      panel = await this.commandPanel(message, lane, {error: response}).catch(() => undefined);
+      // A card that went stale while it ran is refreshed, not reported as a failure.
+      const stale = error instanceof StaleCardError;
+      failed = !stale;
+      response = stale ? STALE_SETTINGS : commandError(error);
+      if (failed) this.audit({stage: 'command-failed', messageId: message.messageId});
+      panel = await this.commandPanel(message, lane, stale ? {notice: response} : {error: response}).catch(() => undefined);
+      if (stale && !panel) panel = {title: '卡片已过期', tone: 'muted', status: {text: response, tone: 'muted'}, summary: response, sections: []};
     }
     const payload = renderPanel(this.stopped ? {title: '连接正在关闭', tone: 'muted', summary: '连接恢复后可重新打开设置，已保存的选择保留',
       sections: [{text: '连接恢复后可重新打开菜单。已保存的选择会保留。'}]}
@@ -791,7 +807,7 @@ export class BotBridge {
         if (lane.session.setModelSelection) lane.session.setModelSelection(modelPreference.selection);
         else await this.unload(lane);
       }
-      if (lane.session) { await this.adoptPermission(message, lane); return; }
+      if (lane.session) { await this.adoptPermission(lane); return; }
     }
     const context = this.sessionContext(message);
     const saved = await this.state.sessions.current(context);
@@ -828,6 +844,8 @@ export class BotBridge {
   private async unload(lane: Lane): Promise<void> {
     const handle = lane.session;
     if (!handle) {lane.unavailable = false; return;}
+    // Keep a preset changed in the App before this session goes away (/new, /resume, idle sweep).
+    await this.adoptPermission(lane).catch(() => this.audit({stage: 'permission-adopt-failed'}));
     lane.unavailable = true;
     try {
       await handle.dispose();
@@ -974,7 +992,7 @@ export class BotBridge {
   /** What this chat runs: the live session's preset, else the chat's saved choice. */
   private async permissionChoice(message: RoutedMessage, lane: Lane): Promise<PermissionView | undefined> {
     if (lane.unavailable) await this.unload(lane);
-    await this.adoptPermission(message, lane);
+    await this.adoptPermission(lane);
     const view = this.permissionView(lane);
     if (!view) return;
     if (view.current) return view;
@@ -1004,7 +1022,9 @@ export class BotBridge {
   /** Bring a newly opened harness session to the chat's choice, or a new one without a choice to the App's default. */
   private async applyPermission(message: RoutedMessage, lane: Lane, handle: RuntimeSession, fresh: boolean): Promise<void> {
     if (!this.harness(message, lane) || !handle.setPermission) return;
-    const saved = await this.state.permissionPreferences?.get(this.context(message));
+    const {ownerKey, conversationKey} = this.context(message);
+    lane.permissionContext = {ownerKey, conversationKey};
+    const saved = await this.state.permissionPreferences?.get(lane.permissionContext);
     const state = handle.permissionState?.();
     // The App's own new sessions start on its default preset; a resumed one keeps what it recorded.
     const target = saved ?? (fresh ? state?.defaultPreset : undefined);
@@ -1013,11 +1033,11 @@ export class BotBridge {
   }
 
   /** A preset changed in the App on this chat's live session becomes the chat's choice, so new sessions keep it. */
-  private async adoptPermission(message: RoutedMessage, lane: Lane): Promise<void> {
-    const live = this.harness(message, lane) ? lane.session?.permissionState?.() : undefined;
+  private async adoptPermission(lane: Lane): Promise<void> {
+    const live = lane.permissionContext ? lane.session?.permissionState?.() : undefined;
     if (!live || live.current === lane.permissionSeen) return;
     lane.permissionSeen = live.current;
-    if (live.options.some(option => option.id === live.current)) await this.state.permissionPreferences?.set(this.context(message), live.current);
+    if (live.options.some(option => option.id === live.current)) await this.state.permissionPreferences?.set(lane.permissionContext!, live.current);
   }
 
   private async modelState(message: RoutedMessage, lane: Lane): Promise<ModelView> {
@@ -1072,6 +1092,8 @@ export class BotBridge {
     const state = await this.modelState(message, lane);
     if (!args || args === 'current' || /^page [0-9]{1,4}$/.test(args)) return modelStateText(state.selection, state.catalog);
     if (!match) return `请通过菜单选择，或发送 /${kind} 查看当前可用选项。`;
+    // Reopening the session may have brought in a choice made in the App since the card was drawn.
+    if (message.expectedModelRevision !== undefined && state.preference.revision !== message.expectedModelRevision) throw new StaleCardError();
     let candidate = kind === 'model' ? modelChoice(state.catalog, match[1]!) : thinkingChoice(state.catalog, state.selection, match[1]!);
     if (!candidate) throw new DshRuntimeError('INVALID_MODEL_SELECTION');
     if (kind === 'model' && candidate.provider === state.selection.provider && candidate.model === state.selection.model) candidate = state.selection;
@@ -1080,11 +1102,19 @@ export class BotBridge {
       const saved = await this.state.modelPreferences!.set(this.context(message), selection, {expectedRevision: state.preference.revision});
       if (shared) {
         // Recorded in the session, then made the App's default for new sessions, as the App's selector does.
-        if (lane.session?.sharesModelSelection) {
-          lane.session.setModelSelection!(saved.selection);
-          await lane.session.checkpoint();
+        const recorded = Boolean(lane.session?.sharesModelSelection);
+        if (recorded) {
+          lane.session!.setModelSelection!(saved.selection);
+          // An unconfirmed pick must not drive another turn: the session is closed and reopened first.
+          try { await lane.session!.checkpoint(); }
+          catch (error) { lane.unavailable = true; throw error; }
         }
-        await this.runtime.saveDefaultModel?.(saved.selection).catch(() => this.audit({stage: 'model-default-unsaved', messageId: message.messageId}));
+        try { await this.runtime.saveDefaultModel?.(saved.selection); }
+        catch (error) {
+          // Without a session holding the pick, the App default is the only place it lives.
+          if (!recorded) throw error;
+          this.audit({stage: 'model-default-unsaved', messageId: message.messageId});
+        }
       } else if (lane.session) {
         if (lane.session.setModelSelection) {
           try {lane.session.setModelSelection(saved.selection);}
@@ -1323,6 +1353,8 @@ export class BotBridge {
     await Promise.all([...this.lanes.values()].map(lane => lane.tail));
     await this.sweepTail;
     await this.progress.drain();
+    // Shutdown disposes sessions directly; keep presets changed in the App first.
+    await Promise.allSettled([...this.lanes.values()].map(lane => this.adoptPermission(lane)));
     const sessions = new Set([...this.failedDisposals, ...[...this.lanes.values()].flatMap(lane => lane.session ? [lane.session] : [])]);
     const results = await Promise.allSettled([...sessions].map(session => session.dispose()));
     if (results.some(result => result.status === 'rejected')) throw new Error('Some dsh sessions did not dispose successfully.');

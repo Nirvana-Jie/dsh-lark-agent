@@ -125,7 +125,7 @@ export interface RuntimeSession {
   setPermission?(id: string): void;
 }
 
-export type RuntimeErrorCode = 'SETUP_FAILED' | 'RESTORE_FAILED' | 'SESSION_IN_USE' | 'PERSISTENCE_FAILED' | 'TURN_FAILED' | 'CANCELLED' | 'OUTPUT_LIMIT' | 'BUSY' | 'DISPOSED' | 'MODEL_UNAVAILABLE' | 'INVALID_MODEL_SELECTION' | 'PERMISSION_UNAVAILABLE';
+export type RuntimeErrorCode = 'SETUP_FAILED' | 'RESTORE_FAILED' | 'SESSION_IN_USE' | 'PERSISTENCE_FAILED' | 'TURN_FAILED' | 'CANCELLED' | 'OUTPUT_LIMIT' | 'BUSY' | 'DISPOSED' | 'MODEL_UNAVAILABLE' | 'INVALID_MODEL_SELECTION' | 'MODEL_NOT_SAVED' | 'PERMISSION_UNAVAILABLE';
 
 /** Safe to show to a chat user: never contains a provider, tool, or host error. */
 export class DshRuntimeError extends Error {
@@ -142,6 +142,7 @@ export class DshRuntimeError extends Error {
       DISPOSED: '当前会话已关闭，请重新开始。',
       MODEL_UNAVAILABLE: '当前宿主暂时无法提供模型选项，请检查模型配置。',
       INVALID_MODEL_SELECTION: '这个模型或思考深度当前不可用，请刷新选项后重试。',
+      MODEL_NOT_SAVED: '模型设置没能保存到电脑上的 Harness，请稍后重试。',
       PERMISSION_UNAVAILABLE: '权限模式暂时无法在飞书切换，请在电脑上的 Harness 里调整。',
     };
     super(messages[code]);
@@ -703,7 +704,7 @@ export class DshRuntime {
     const service = this.ctx.get('agentDefaultModel') as DefaultModelService | undefined;
     if (typeof service?.saveSelection !== 'function') return;
     try { await service.saveSelection(nativeSelection(modelSelection(selection))); }
-    catch { throw new DshRuntimeError('MODEL_UNAVAILABLE'); }
+    catch { throw new DshRuntimeError('MODEL_NOT_SAVED'); }
   }
 
   /** The preset a stored session runs on: its current projection, else its header. */

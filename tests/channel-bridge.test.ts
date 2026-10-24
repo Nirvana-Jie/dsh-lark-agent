@@ -12,10 +12,12 @@ import { MemoryStore } from '../src/memory-store.js';
 import type { ReplyPayload } from '../src/replies.js';
 import { SessionStore } from '../src/session-store.js';
 import { ModelPreferencesStore } from '../src/model-preferences.js';
-import { modelChoiceKey } from '../src/model-controls.js';
+import { modelChoiceKey, thinkingChoiceKey } from '../src/model-controls.js';
+import { DshRuntimeError } from '../src/dsh-runtime.js';
 import { PermissionPreferencesStore } from '../src/permission-preferences.js';
 
 const directories: string[] = [];
+const LATER = 365 * 24 * 60 * 60_000;
 const bridges = new Set<BotBridge>();
 let sequence = 0;
 type Run = RuntimeSession['run'];
@@ -55,6 +57,8 @@ function tokens(payload: ReplyPayload | undefined): string[] {
   return found;
 }
 
+// Both models offer the same thinking levels, so a stale card's level would apply to either.
+const EFFORTS = [{id: 'low', name: '低'}, {id: 'high', name: '高'}];
 const PERMISSIONS = [{id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改'}, {id: 'danger-full-access', name: '完全权限'}];
 
 async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; shared?: boolean} = {}) {
@@ -71,12 +75,13 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const ledger = await DiskLedger.open(config.stateDir);
   const run = vi.fn<Run>(options.run ?? (async () => '普通回答'));
   const policies: AgentPolicy[] = [];
+  const hostRecord = {model: 'm'};
   const handles: Array<RuntimeSession & {setPermission?: ReturnType<typeof vi.fn>; changeInApp?: (next: string) => void;
     setModelSelection?: ReturnType<typeof vi.fn>; checkpoint: ReturnType<typeof vi.fn>; changeModelInApp?: (next: ModelSelection) => void}> = [];
   const handle = (policy: AgentPolicy, id: string = randomUUID()): RuntimeSession => {
     policies.push(policy);
     let current = 'workspace-write';
-    let selection: ModelSelection = {provider: policy.provider ?? 'p', model: policy.model ?? 'm'};
+    let selection: ModelSelection = {provider: policy.provider ?? 'p', model: policy.model ?? hostRecord.model};
     const value = {id, run: (...args: Parameters<Run>) => run(...args), checkpoint: vi.fn(async () => undefined), cancel: vi.fn(), dispose: vi.fn(async () => undefined),
       ...(options.models ? {modelSelection: () => ({...selection}), setModelSelection: vi.fn((next: ModelSelection) => { selection = {...next}; }),
         sharesModelSelection: Boolean(options.shared), changeModelInApp: (next: ModelSelection) => { selection = {...next}; }} : {}),
@@ -89,8 +94,8 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   };
   const runtime = {create: vi.fn(async (policy: AgentPolicy) => handle(policy)), resume: vi.fn(async (policy: AgentPolicy, id: string) => handle(policy, id)),
     ...(options.permissions ? {permissionOptions: () => PERMISSIONS} : {}),
-    ...(options.models ? {catalog: async () => ({models: [{provider: 'p', providerName: 'Provider', model: 'm', name: 'Model'},
-      {provider: 'p', providerName: 'Provider', model: 'n', name: 'Model N'}], defaultSelection: {provider: 'p', model: 'm'}}),
+    ...(options.models ? {catalog: async () => ({models: [{provider: 'p', providerName: 'Provider', model: 'm', name: 'Model', reasoning: {efforts: EFFORTS}},
+      {provider: 'p', providerName: 'Provider', model: 'n', name: 'Model N', reasoning: {efforts: EFFORTS}}], defaultSelection: {provider: 'p', model: 'm'}}),
       resolveModelSelection: async (selection?: {provider: string; model: string}) => selection ?? {provider: 'p', model: 'm'}} : {}),
     ...(options.shared ? {sharesModelSelection: () => true, saveDefaultModel: vi.fn(async (_selection: ModelSelection) => undefined)} : {})};
   let feedbackCount = 0;
@@ -116,7 +121,7 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const sentText = () => [...transport.reply.mock.calls.map(call => call[1]),
     ...transport.replyRich.mock.calls.map(call => call[1].kind === 'text' ? call[1].text : call[1].kind === 'post' ? call[1].markdown : call[1].fallbackText)];
   const finalCard = () => JSON.stringify(transport.updateCardEntity.mock.calls.at(-1)?.[1] ?? {});
-  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences};
+  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences, hostRecord};
 }
 
 describe('BotBridge harness channel', () => {
@@ -337,6 +342,21 @@ describe('harness channel permission switch', () => {
     expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('read-only');
   });
 
+  it('keeps a mode changed in the App when a new topic starts or the session goes idle', async () => {
+    const h = await setup({streaming: false, permissions: true});
+    await h.bridge.accept(event('hello'));
+    h.handles[0]!.changeInApp!('read-only');
+    // Straight to a new topic, without another turn or a look at the panel first.
+    await h.bridge.accept(event('/new'));
+    await h.bridge.accept(event('next topic'));
+    expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('read-only');
+    h.handles[1]!.changeInApp!('danger-full-access');
+    await h.bridge.sweep(Date.now() + LATER);
+    await h.bridge.accept(event('again'));
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles[2]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
+  });
+
   it('reaches the switch from the model settings panel', async () => {
     const h = await setup({streaming: false, permissions: true, models: true});
     await h.bridge.accept(event('/model'));
@@ -393,6 +413,73 @@ describe('harness model shared with the App', () => {
     await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
     expect(h.runtime.resume).toHaveBeenCalledOnce();
     expect(h.handles[1]!.setModelSelection).toHaveBeenCalledExactlyOnceWith({provider: 'p', model: 'n'});
+  });
+
+  const level = (h: Awaited<ReturnType<typeof setup>>, payload: ReplyPayload | undefined, effort: string) =>
+    tokens(payload).find(token => h.actions.verify(token)!.command === `/thinking use ${thinkingChoiceKey(effort)}`)!;
+  const template = (payload: ReplyPayload) => payload.kind === 'card' ? (payload.card.header as {template: string}).template : undefined;
+
+  it('refreshes a thinking card instead of applying it after the App switched the live model', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/thinking'));
+    const card = rich(h).at(-1);
+    h.handles[0]!.changeModelInApp!({provider: 'p', model: 'n'});
+    await h.bridge.accept(callback(level(h, card, 'high')));
+    expect(h.handles[0]!.setModelSelection).not.toHaveBeenCalled();
+    const [target, refreshed] = h.transport.updateFeedback.mock.calls.at(-1)!;
+    expect(target).toBe('om_card');
+    expect(JSON.stringify(refreshed)).toContain('设置刚刚变化');
+    expect(JSON.stringify(refreshed)).toContain('当前模型：Model N');
+  });
+
+  it('refreshes a thinking card when reopening the idle session brings in a newer choice', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/thinking'));
+    const card = rich(h).at(-1);
+    await h.bridge.sweep(Date.now() + LATER);
+    // While it was idle, the session's own record moved on in the App.
+    h.hostRecord.model = 'n';
+    await h.bridge.accept(callback(level(h, card, 'high')));
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles[1]!.setModelSelection).not.toHaveBeenCalled();
+    const refreshed = h.transport.updateFeedback.mock.calls.at(-1)![1];
+    expect(template(refreshed)).toBe('blue');
+    expect(JSON.stringify(refreshed)).toContain('设置刚刚变化');
+  });
+
+  it('reports a pick that only the App default would hold when saving it fails', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    // No conversation yet: the pick can only live in the App default.
+    await h.bridge.accept(event('/model'));
+    h.runtime.saveDefaultModel!.mockRejectedValueOnce(new DshRuntimeError('MODEL_NOT_SAVED'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    const failed = h.transport.updateFeedback.mock.calls.at(-1)![1];
+    expect(template(failed)).toBe('red');
+    expect(JSON.stringify(failed)).toContain('没能保存');
+    // With a session the pick is recorded there, so a failed default save is only logged.
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/model'));
+    h.runtime.saveDefaultModel!.mockRejectedValueOnce(new DshRuntimeError('MODEL_NOT_SAVED'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(template(h.transport.updateFeedback.mock.calls.at(-1)![1])).toBe('green');
+    expect(h.audit).toHaveBeenCalledWith(expect.objectContaining({stage: 'model-default-unsaved'}));
+  });
+
+  it('closes and reopens the session before another turn when a pick was not saved', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/model'));
+    h.handles[0]!.checkpoint.mockRejectedValueOnce(new DshRuntimeError('PERSISTENCE_FAILED'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(template(h.transport.updateFeedback.mock.calls.at(-1)![1])).toBe('red');
+    await h.bridge.accept(event('next'));
+    // The unconfirmed pick never drives a turn: that session was closed and the saved one reopened.
+    expect(h.handles[0]!.dispose).toHaveBeenCalled();
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles).toHaveLength(2);
+    expect(h.run).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the chat copy for a host that cannot share, and never touches the App default', async () => {

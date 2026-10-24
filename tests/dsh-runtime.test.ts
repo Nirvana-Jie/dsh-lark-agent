@@ -1419,6 +1419,6 @@ describe('harness model shared with the App', () => {
     await f.runtime.saveDefaultModel({provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
     expect(host.saveSelection).toHaveBeenCalledExactlyOnceWith({provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
     host.saveSelection.mockRejectedValueOnce(new Error('PRIVATE_CONFIG_PATH'));
-    await expect(f.runtime.saveDefaultModel({provider: 'host-provider', model: 'host-model'})).rejects.toMatchObject({code: 'MODEL_UNAVAILABLE'});
+    await expect(f.runtime.saveDefaultModel({provider: 'host-provider', model: 'host-model'})).rejects.toMatchObject({code: 'MODEL_NOT_SAVED'});
   });
 });
