@@ -1,4 +1,3 @@
-import {spawnSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {mkdir, mkdtemp, readFile, writeFile, stat, readdir, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -721,37 +720,44 @@ describe('pairing identity and receiver lease', () => {
     expect(h.transport.start).not.toHaveBeenCalled(); expect(h.release).not.toHaveBeenCalled();
   });
 
+  // Real processes: on a loaded macOS host, a newly written executable's first launch alone can take seconds.
   it.skipIf(process.platform === 'win32')('recovers a lease left by an exited process only when the bot CLI reports no consumers', async () => {
     const home = await directory(), previous = process.env.HOME;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     process.env.HOME = home;
     try {
-      const lease = join(botLeaseDirectory('ou_bot'), 'instance.lock'), exited = spawnSync(process.execPath, ['-e', '']).pid!;
+      // Above every OS PID limit, so no process can hold it; a reaped child's PID may be handed out again.
+      const lease = join(botLeaseDirectory('ou_bot'), 'instance.lock'), exited = 2 ** 31 - 1;
       const plant = async () => {
         await mkdir(lease, {recursive: true});
         await writeFile(join(lease, 'owner.json'), JSON.stringify({version: 1, pid: exited, identity: null, createdAt: Date.now(), token: randomUUID()}));
       };
-      const cli = async (status: unknown) => {
-        const path = join(home, `lark-cli-${randomUUID()}`);
-        await writeFile(path, `#!/bin/sh\nprintf '%s' '${JSON.stringify(status)}'\n`, {mode: 0o700});
-        return path;
-      };
-      const pair = (executable: string) => {
+      // Both pairings run one fake CLI that prints the last reported status, so only the first launch is of a new file.
+      const cli = join(home, 'lark-cli');
+      await writeFile(cli, '#!/bin/sh\ncat "$0.json"\n', {mode: 0o700});
+      const report = (status: unknown) => writeFile(`${cli}.json`, JSON.stringify(status));
+      const pair = () => {
         let deliver!: (raw: unknown) => void;
-        const transport = {start: vi.fn(async (onEvent: (raw: unknown) => void) => {deliver = onEvent;}), stop: vi.fn(async () => undefined)};
+        const receiving = deferred<void>();
+        const transport = {start: vi.fn(async (onEvent: (raw: unknown) => void) => {deliver = onEvent; receiving.resolve();}), stop: vi.fn(async () => undefined)};
         const pending = waitForPairing({profile: 'test-bot', botOpenId: 'ou_bot', challenge: {code: 'DSH-fixture', expiresAt: Date.now() + 60_000},
-          expectedOwner: 'ou_owner', signal: new AbortController().signal, transport, executable});
-        return {transport, pending, send: () => deliver(raw())};
+          expectedOwner: 'ou_owner', signal: new AbortController().signal, transport, executable: cli});
+        // The receiver's start, or the pairing's own error if the lease is refused, instead of polling against a deadline.
+        const started = () => Promise.race([receiving.promise, pending.then(() => undefined)]);
+        return {transport, pending, started, send: () => deliver(raw())};
       };
 
       await plant();
-      const busy = pair(await cli({apps: [{app_id: 'cli_fixture', status: 'running', running: true, active_consumers: 1, consumers: [{pid: 7}]}]}));
-      await expect(busy.pending).rejects.toMatchObject({code: 'BUSY'});
+      await report({apps: [{app_id: 'cli_fixture', status: 'running', running: true, active_consumers: 1, consumers: [{pid: 7}]}]});
+      const busy = pair();
+      await expect(busy.started()).rejects.toMatchObject({code: 'BUSY'});
       expect(busy.transport.start).not.toHaveBeenCalled();
       expect(JSON.parse(await readFile(join(lease, 'owner.json'), 'utf8')).pid).toBe(exited);
 
-      const free = pair(await cli({apps: [{app_id: 'cli_fixture', status: 'not_running', running: false}]}));
-      await vi.waitFor(() => expect(free.transport.start).toHaveBeenCalledOnce());
+      await report({apps: [{app_id: 'cli_fixture', status: 'not_running', running: false}]});
+      const free = pair();
+      await free.started();
+      expect(free.transport.start).toHaveBeenCalledOnce();
       expect(JSON.parse(await readFile(join(lease, 'owner.json'), 'utf8')).pid).toBe(process.pid);
       free.send();
       expect((await free.pending).messageId).toBe('om_pair');
@@ -761,5 +767,5 @@ describe('pairing identity and receiver lease', () => {
       process.env.HOME = previous;
       warn.mockRestore();
     }
-  });
+  }, 30_000);
 });
