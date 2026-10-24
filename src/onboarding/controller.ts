@@ -12,6 +12,7 @@ import {ConnectionStore, type ConnectionRecord} from './store.js';
 import {createChallenge, PairingError, waitForPairing} from './pairing.js';
 import type {ConnectionEndpoint, ConnectionProfile, ConnectionSnapshot} from './protocol.js';
 import {defaultScopesReady} from '../rich-scopes.js';
+import {missingBotMenuEntries, type BotMenuEntry} from '../bot-menu.js';
 
 export interface OnboardingDependencies {
   platform: Pick<LarkPlatform, 'listProfiles' | 'registerNew' | 'saveNewProfile' | 'inspect' | 'configureAndPublish'> & Partial<Pick<LarkPlatform, 'enableDocuments'>>;
@@ -82,6 +83,8 @@ export class ConnectionController {
   private unsafeStop = false;
   private menuReady = false;
   private documentsReady = false;
+  /** Menu entries the published app lacks; the owner adds them in the developer console. */
+  private menuMissing: BotMenuEntry[] = [];
   private documentSetup?: ConnectionSnapshot['documentSetup'];
   private documentJob?: Promise<void>;
   private documentAborter?: AbortController;
@@ -92,7 +95,8 @@ export class ConnectionController {
   constructor(private readonly deps: OnboardingDependencies) {}
 
   snapshot(): ConnectionSnapshot {return structuredClone({...this.state,
-    capabilities: {...this.state.capabilities, documents: this.documentsReady}, ...(this.documentSetup ? {documentSetup: this.documentSetup} : {})});}
+    capabilities: {...this.state.capabilities, documents: this.documentsReady}, ...(this.documentSetup ? {documentSetup: this.documentSetup} : {}),
+    ...(this.record && this.menuMissing.length ? {menu: {missing: this.menuMissing, url: this.consoleUrl()}} : {})});}
   private phase(phase: ConnectionSnapshot['phase'], message: string = messages[phase]): void {
     this.state = {phase, message, busy: ['creating', 'configuring', 'starting'].includes(phase),
       capabilities: {cards: this.record?.cards ?? true, loading: this.record?.loading ?? true},
@@ -160,6 +164,7 @@ export class ConnectionController {
         if (!aborter.signal.aborted && !this.closed && this.record?.appId === record.appId) {
           if (inspection.appId === record.appId && (!record.botOpenId || inspection.botOpenId === record.botOpenId)) {
             this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
+            this.menuMissing = missingBotMenuEntries(inspection.menuEventKeys ?? []);
           }
         }
       }).catch(() => { /* A metadata outage must not turn an intentional pause into a failed connection. */ })
@@ -301,6 +306,7 @@ export class ConnectionController {
     let record = this.record!;
     let inspection: Inspection = await this.deps.platform.inspect(record.profile, signal);
     this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
+    this.menuMissing = missingBotMenuEntries(inspection.menuEventKeys ?? []);
     this.assertCurrent(signal);
     if (inspection.appId !== record.appId || (record.botOpenId && inspection.botOpenId && record.botOpenId !== inspection.botOpenId)) {
       throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);

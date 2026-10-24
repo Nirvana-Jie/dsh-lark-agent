@@ -61,13 +61,14 @@ function tokens(payload: ReplyPayload | undefined): string[] {
 const EFFORTS = [{id: 'low', name: '低'}, {id: 'high', name: '高'}];
 const PERMISSIONS = [{id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改'}, {id: 'danger-full-access', name: '完全权限'}];
 
-async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; shared?: boolean} = {}) {
+async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; shared?: boolean; turnTimeoutMs?: number} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-channel-bridge-'));
   directories.push(directory);
   const workspace = join(directory, 'alice');
   await mkdir(workspace, {recursive: true});
   const config = parseConfig({profile: 'channel-test', botOpenId: 'ou_bot', stateDir: join(directory, 'state'),
     cardInteractions: options.cards ?? true, streamingCards: options.streaming ?? true, loadingReaction: true,
+    ...(options.turnTimeoutMs ? {turnTimeoutMs: options.turnTimeoutMs} : {}),
     users: [{openId: 'ou_alice', direct: true, directMode: 'harness', groupChats: ['oc_group'], cwd: workspace}]});
   const sessions = await SessionStore.open(config.stateDir);
   const memories = await MemoryStore.open(config.stateDir);
@@ -169,6 +170,27 @@ describe('BotBridge harness channel', () => {
     await turn;
     expect(h.finalCard()).toContain('已停止。');
     expect(h.sentText()).toEqual(['已请求停止当前处理，排队消息已取消。']);
+  });
+
+  it('lets an owner turn run past a configured cap that still bounds a group turn', async () => {
+    const h = await setup({turnTimeoutMs: 1000, run: (_text, signal) => new Promise((resolve, reject) => {
+      const done = setTimeout(() => resolve('长任务完成'), 5_000);
+      signal.addEventListener('abort', () => { clearTimeout(done); reject(new DshRuntimeError('CANCELLED')); }, {once: true});
+    })});
+    vi.useFakeTimers({shouldAdvanceTime: true});
+    const owner = h.bridge.accept(event('long task'));
+    await vi.waitFor(() => expect(h.run).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await owner;
+    expect(h.run.mock.calls[0]![1].aborted).toBe(false);
+    expect(h.finalCard()).toContain('长任务完成');
+    expect(h.finalCard()).not.toContain('超时');
+    const restricted = h.bridge.accept(group('long group task'));
+    await vi.waitFor(() => expect(h.run).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(1_001);
+    await restricted;
+    expect(h.run.mock.calls[1]![1].aborted).toBe(true);
+    expect(h.sentText()).toEqual([expect.stringContaining('超时')]);
   });
 
   it('asks for approval with a card and resumes the waiting turn on a click from outside its queue', async () => {

@@ -300,7 +300,22 @@ describe('BotBridge commands, limits and cancellation', () => {
     await h.bridge.stop();
   });
 
-  it('aborts a timed out run and reports a safe timeout', async () => {
+  it('lets a long run finish when no cap is configured', async () => {
+    vi.useFakeTimers({shouldAdvanceTime: true});
+    const h = harness({}, (_text, signal) => new Promise((resolve, reject) => {
+      const done = setTimeout(() => resolve('一小时后完成'), 3_600_000);
+      signal.addEventListener('abort', () => { clearTimeout(done); reject(new DshRuntimeError('CANCELLED')); }, {once: true});
+    }));
+    const task = h.bridge.accept(h.event('long'));
+    await vi.waitFor(() => expect(h.sessions[0]?.run).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await task;
+    expect(h.sessions[0]!.run.mock.calls[0]![1].aborted).toBe(false);
+    expect(h.replies.mock.calls.map(call => call[1])).toEqual(['一小时后完成']);
+    await h.bridge.stop();
+  });
+
+  it('aborts a run past a configured cap and reports a safe timeout', async () => {
     vi.useFakeTimers();
     const h = harness({turnTimeoutMs: 1000}, (_text, signal) => new Promise((_resolve, reject) => {
       signal.addEventListener('abort', () => reject(new DshRuntimeError('CANCELLED')), {once: true});

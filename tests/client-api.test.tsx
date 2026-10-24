@@ -11,6 +11,13 @@ describe('owner connection API', () => {
     expect(() => parseSnapshot({...idle, update: {current: '0.2.0'}})).toThrow();
     expect(() => parseSnapshot({...idle, update: '0.3.0'})).toThrow();
   });
+  it('accepts missing menu entries only with dsh event keys and an official console link', () => {
+    const menu = {missing: [{label: '权限模式', eventKey: 'dsh.permission', parent: '设置'}], url: 'https://open.feishu.cn/app/cli_demo'};
+    expect(parseSnapshot({...idle, menu}).menu).toEqual(menu);
+    expect(() => parseSnapshot({...idle, menu: {...menu, url: 'https://example.com/app'}})).toThrow();
+    expect(() => parseSnapshot({...idle, menu: {...menu, missing: [{label: 'x', eventKey: 'javascript:alert(1)'}]}})).toThrow();
+    expect(() => parseSnapshot({...idle, menu: {...menu, missing: []}})).toThrow();
+  });
   it('uses the host RPC and preserves caller cancellation', async () => {
     const call = vi.fn(async () => ({ok: true, value: idle}));
     const signal = new AbortController().signal;

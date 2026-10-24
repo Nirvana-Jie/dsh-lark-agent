@@ -1,5 +1,5 @@
 import {useEffect, useId, useState, type ReactNode} from 'react';
-import type {ConnectionPhase} from '../onboarding/protocol.js';
+import type {ConnectionPhase, ConnectionSnapshot} from '../onboarding/protocol.js';
 import type {ConnectionApi} from './api.js';
 import {useConnection} from './use-connection.js';
 import pluginIcon from '../../assets/plugin-icon.png';
@@ -45,6 +45,23 @@ function Steps({active}: {active: number}) {
     <li key={label} className={index < active ? 'done' : index === active ? 'active' : ''} aria-current={index === active ? 'step' : undefined}>
       <span aria-hidden="true">{index < active ? '✓' : index + 1}</span>{label}
     </li>)}</ol>;
+}
+
+/**
+ * The app's published menu predates an entry. The plugin holds no permission
+ * to change the menu, so the owner adds it in the developer console.
+ */
+function MenuNotice({menu, phase}: {menu: NonNullable<ConnectionSnapshot['menu']>; phase: ConnectionPhase}) {
+  return <div className="lark-update" role="status">
+    <strong>飞书底部菜单缺少入口</strong>
+    <p>{menu.missing.map(entry => `${entry.parent ? `${entry.parent} → ` : ''}${entry.label}（事件标识 ${entry.eventKey}）`).join('、')}</p>
+    <ol className="lark-instructions">
+      <li>在飞书开发者后台打开「机器人自定义菜单」补上，响应动作选「推送事件」，事件标识逐字填写。</li>
+      <li>创建版本并发布，客户端约 5 分钟后更新。</li>
+      <li>{phase === 'paused' ? '回到这里点「恢复连接」。' : '回到这里点「暂停连接」，再点「恢复连接」。'}</li>
+    </ol>
+    <div className="lark-actions"><External url={menu.url}>打开飞书后台</External></div>
+  </div>;
 }
 
 /**
@@ -176,6 +193,7 @@ export function ConnectionCard({api, host}: ConnectionCardProps) {
       <div className="lark-connected-row"><div><strong>{snapshot.bot?.name || '我的飞书助手'}</strong><p>{phase === 'paused' ? '连接已暂停' : '已确认本人 · 私聊已就绪'}</p></div><button className="lark-text-button" disabled={disabled} onClick={() => void mutate('recheck')}>检查连接</button></div>
       <div className="lark-connected-row"><div><strong>实时回复、文档与画板</strong><p>{snapshot.capabilities.documents ? '已启用 · 回复实时显示，私聊作品仅供本人查看' : '实时显示回复和思考过程，并把复杂方案整理成文档和图示'}</p></div>
         {!snapshot.capabilities.documents && !snapshot.documentSetup && <button className="lark-secondary" disabled={disabled} onClick={() => void mutate('enable-documents')}>补充默认权限</button>}</div>
+      {snapshot.menu && <MenuNotice menu={snapshot.menu} phase={phase} />}
       {snapshot.documentSetup && <div className="lark-notice" role="status"><p>{snapshot.documentSetup.message}</p>
         {snapshot.documentSetup.phase === 'preparing' && <span className="lark-spinner" aria-label="正在准备授权" />}
         {snapshot.documentSetup.qr && <><div className="lark-qr"><img src={snapshot.documentSetup.qr.image} alt="默认权限补充授权二维码" /></div>

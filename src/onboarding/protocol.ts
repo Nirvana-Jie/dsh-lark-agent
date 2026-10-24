@@ -13,6 +13,8 @@ export interface ConnectionSnapshot {
   action?: {label: string; url: string};
   capabilities: {cards: boolean; loading: boolean; documents?: boolean};
   documentSetup?: {phase: 'preparing' | 'scanning' | 'error'; message: string; qr?: {url: string; image: string; expiresAt: number}};
+  /** Bottom-menu entries the published app lacks, and where its owner adds them. */
+  menu?: {missing: Array<{label: string; eventKey: string; parent?: string}>; url: string};
   /** A newer published release of this plugin, with the installed version. */
   update?: {current: string; latest: string};
 }

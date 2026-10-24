@@ -123,6 +123,19 @@ describe('LiveReply streaming card', () => {
     expect(elements(final).at(-1)).toMatchObject({element_id: 'footer', icon: {token: 'robot_outlined'}});
   });
 
+  it('reads a long turn in minutes and hours', async () => {
+    const minutes = harness();
+    await minutes.reply.open();
+    minutes.advance(25 * 60_000 + 7_000);
+    await minutes.reply.finish({phase: 'done', answer: 'done', reasoning: 'why'});
+    expect(title(minutes.last())).toBe('已完成，用时 25 分 7 秒');
+    const hours = harness();
+    await hours.reply.open();
+    hours.advance(2 * 3_600_000 + 3 * 60_000 + 59_000);
+    await hours.reply.finish({phase: 'stopped', note: '已停止。', reasoning: 'why'});
+    expect(title(hours.last())).toBe('已停止，用时 2 小时 3 分');
+  });
+
   it('shows a long process in full when it fits, and an answer first when the card cannot hold both', async () => {
     const h = harness();
     await h.reply.open();
