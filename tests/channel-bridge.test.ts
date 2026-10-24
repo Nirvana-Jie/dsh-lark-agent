@@ -6,15 +6,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BotBridge } from '../src/bridge.js';
 import { CardActions } from '../src/card-actions.js';
 import { parseConfig } from '../src/config.js';
-import type { AgentPolicy, RuntimeSession, TurnObserver } from '../src/dsh-runtime.js';
+import type { AgentPolicy, ModelSelection, RuntimeSession, TurnObserver } from '../src/dsh-runtime.js';
 import { DiskLedger } from '../src/ledger.js';
 import { MemoryStore } from '../src/memory-store.js';
 import type { ReplyPayload } from '../src/replies.js';
 import { SessionStore } from '../src/session-store.js';
 import { ModelPreferencesStore } from '../src/model-preferences.js';
+import { modelChoiceKey, thinkingChoiceKey } from '../src/model-controls.js';
+import { DshRuntimeError } from '../src/dsh-runtime.js';
 import { PermissionPreferencesStore } from '../src/permission-preferences.js';
 
 const directories: string[] = [];
+const LATER = 365 * 24 * 60 * 60_000;
 const bridges = new Set<BotBridge>();
 let sequence = 0;
 type Run = RuntimeSession['run'];
@@ -54,9 +57,11 @@ function tokens(payload: ReplyPayload | undefined): string[] {
   return found;
 }
 
+// Both models offer the same thinking levels, so a stale card's level would apply to either.
+const EFFORTS = [{id: 'low', name: '低'}, {id: 'high', name: '高'}];
 const PERMISSIONS = [{id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改'}, {id: 'danger-full-access', name: '完全权限'}];
 
-async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean} = {}) {
+async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; shared?: boolean} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-channel-bridge-'));
   directories.push(directory);
   const workspace = join(directory, 'alice');
@@ -70,19 +75,29 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const ledger = await DiskLedger.open(config.stateDir);
   const run = vi.fn<Run>(options.run ?? (async () => '普通回答'));
   const policies: AgentPolicy[] = [];
-  const handles: Array<RuntimeSession & {setPermission?: ReturnType<typeof vi.fn>}> = [];
+  const hostRecord = {model: 'm'};
+  const handles: Array<RuntimeSession & {setPermission?: ReturnType<typeof vi.fn>; changeInApp?: (next: string) => void;
+    setModelSelection?: ReturnType<typeof vi.fn>; checkpoint: ReturnType<typeof vi.fn>; changeModelInApp?: (next: ModelSelection) => void}> = [];
   const handle = (policy: AgentPolicy, id: string = randomUUID()): RuntimeSession => {
     policies.push(policy);
     let current = 'workspace-write';
+    let selection: ModelSelection = {provider: policy.provider ?? 'p', model: policy.model ?? hostRecord.model};
     const value = {id, run: (...args: Parameters<Run>) => run(...args), checkpoint: vi.fn(async () => undefined), cancel: vi.fn(), dispose: vi.fn(async () => undefined),
-      ...(options.permissions ? {permissionState: () => ({current, options: PERMISSIONS}), setPermission: vi.fn((next: string) => { current = next; })} : {})};
+      ...(options.models ? {modelSelection: () => ({...selection}), setModelSelection: vi.fn((next: ModelSelection) => { selection = {...next}; }),
+        sharesModelSelection: Boolean(options.shared), changeModelInApp: (next: ModelSelection) => { selection = {...next}; }} : {}),
+      ...(options.permissions ? {permissionState: () => ({current, options: PERMISSIONS, ...(options.defaultPreset ? {defaultPreset: options.defaultPreset} : {})}),
+        setPermission: vi.fn((next: string) => { current = next; }),
+        // What a change made in the App on this session looks like from here.
+        changeInApp: (next: string) => { current = next; }} : {})};
     handles.push(value);
     return value;
   };
   const runtime = {create: vi.fn(async (policy: AgentPolicy) => handle(policy)), resume: vi.fn(async (policy: AgentPolicy, id: string) => handle(policy, id)),
     ...(options.permissions ? {permissionOptions: () => PERMISSIONS} : {}),
-    ...(options.models ? {catalog: async () => ({models: [{provider: 'p', providerName: 'Provider', model: 'm', name: 'Model'}], defaultSelection: {provider: 'p', model: 'm'}}),
-      resolveModelSelection: async (selection?: {provider: string; model: string}) => selection ?? {provider: 'p', model: 'm'}} : {})};
+    ...(options.models ? {catalog: async () => ({models: [{provider: 'p', providerName: 'Provider', model: 'm', name: 'Model', reasoning: {efforts: EFFORTS}},
+      {provider: 'p', providerName: 'Provider', model: 'n', name: 'Model N', reasoning: {efforts: EFFORTS}}], defaultSelection: {provider: 'p', model: 'm'}}),
+      resolveModelSelection: async (selection?: {provider: string; model: string}) => selection ?? {provider: 'p', model: 'm'}} : {}),
+    ...(options.shared ? {sharesModelSelection: () => true, saveDefaultModel: vi.fn(async (_selection: ModelSelection) => undefined)} : {})};
   let feedbackCount = 0;
   const transport = {
     reply: vi.fn(async (_id: string, _text: string, _options: unknown) => undefined),
@@ -106,7 +121,7 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const sentText = () => [...transport.reply.mock.calls.map(call => call[1]),
     ...transport.replyRich.mock.calls.map(call => call[1].kind === 'text' ? call[1].text : call[1].kind === 'post' ? call[1].markdown : call[1].fallbackText)];
   const finalCard = () => JSON.stringify(transport.updateCardEntity.mock.calls.at(-1)?.[1] ?? {});
-  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences};
+  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences, hostRecord};
 }
 
 describe('BotBridge harness channel', () => {
@@ -275,25 +290,71 @@ describe('harness channel help', () => {
 describe('harness channel permission switch', () => {
   const rich = (h: Awaited<ReturnType<typeof setup>>) => h.transport.replyRich.mock.calls.map(call => call[1]);
 
-  it('switches the private chat from a card, with a second confirmation for full access, and keeps it for new sessions', async () => {
+  it('switches on the clicked card itself, with a second confirmation for full access, and keeps it for new sessions', async () => {
     const h = await setup({streaming: false, permissions: true});
     await h.bridge.accept(event('hello'));
     expect(h.handles[0]!.setPermission).not.toHaveBeenCalled();
     await h.bridge.accept(event('/permission'));
     const panel = rich(h).at(-1)!;
     expect(JSON.stringify(panel)).toContain('当前：工作区内修改');
+    // The current mode is shown, not offered.
     const buttons = tokens(panel).map(token => ({token, command: h.actions.verify(token)!.command}));
-    expect(buttons.map(button => button.command)).toEqual(['/permission use read-only', '/permission use workspace-write', '/permission use danger-full-access']);
+    expect(buttons.map(button => button.command)).toEqual(['/permission use read-only', '/permission use danger-full-access']);
+    expect(JSON.stringify(panel)).toContain('✓ 工作区内修改');
     expect(JSON.stringify(panel)).toContain('切换到「完全权限」？');
-    await h.bridge.accept(callback(buttons[2]!.token));
+    const sent = h.transport.replyRich.mock.calls.length;
+    await h.bridge.accept(callback(buttons[1]!.token));
     expect(h.handles[0]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
-    expect(JSON.stringify(rich(h).at(-1))).toContain('权限模式已更新');
+    // No second card: the clicked card turns green, with the new mode and fresh buttons.
+    expect(h.transport.replyRich).toHaveBeenCalledTimes(sent);
+    const [target, updated] = h.transport.updateFeedback.mock.calls.at(-1)!;
+    expect(target).toBe('om_card');
+    expect(updated.kind === 'card' && (updated.card.header as {template: string}).template).toBe('green');
+    expect(JSON.stringify(updated)).toContain('已切换到「完全权限」');
+    expect(tokens(updated).map(token => h.actions.verify(token)!.command)).toEqual(['/permission use read-only', '/permission use workspace-write']);
     // A one-time button cannot switch again.
-    await h.bridge.accept(callback(buttons[2]!.token));
+    await h.bridge.accept(callback(buttons[1]!.token));
     expect(h.handles[0]!.setPermission).toHaveBeenCalledOnce();
     await h.bridge.accept(event('/new'));
     await h.bridge.accept(event('next topic'));
     expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
+  });
+
+  it('starts a new session on the App default preset when the chat has no choice of its own', async () => {
+    const h = await setup({streaming: false, permissions: true, defaultPreset: 'danger-full-access'});
+    await h.bridge.accept(event('hello'));
+    expect(h.handles[0]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
+    // A resumed session keeps what it recorded.
+    await h.bridge.sweep(Date.now() + 365 * 24 * 60 * 60_000);
+    await h.bridge.accept(event('again'));
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles[1]!.setPermission).not.toHaveBeenCalled();
+  });
+
+  it('takes a mode changed in the App on the live session as the chat\'s choice', async () => {
+    const h = await setup({streaming: false, permissions: true});
+    await h.bridge.accept(event('hello'));
+    h.handles[0]!.changeInApp!('read-only');
+    await h.bridge.accept(event('/permission'));
+    expect(JSON.stringify(rich(h).at(-1))).toContain('当前：仅可查看');
+    await h.bridge.accept(event('/new'));
+    await h.bridge.accept(event('next topic'));
+    expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('read-only');
+  });
+
+  it('keeps a mode changed in the App when a new topic starts or the session goes idle', async () => {
+    const h = await setup({streaming: false, permissions: true});
+    await h.bridge.accept(event('hello'));
+    h.handles[0]!.changeInApp!('read-only');
+    // Straight to a new topic, without another turn or a look at the panel first.
+    await h.bridge.accept(event('/new'));
+    await h.bridge.accept(event('next topic'));
+    expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('read-only');
+    h.handles[1]!.changeInApp!('danger-full-access');
+    await h.bridge.sweep(Date.now() + LATER);
+    await h.bridge.accept(event('again'));
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles[2]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
   });
 
   it('reaches the switch from the model settings panel', async () => {
@@ -307,5 +368,129 @@ describe('harness channel permission switch', () => {
     const h = await setup({streaming: false, permissions: true});
     await h.bridge.accept(group('/permission'));
     expect(h.sentText()).toEqual(['权限模式只能在你和我的私聊里切换。']);
+  });
+});
+
+describe('harness model shared with the App', () => {
+  const rich = (h: Awaited<ReturnType<typeof setup>>) => h.transport.replyRich.mock.calls.map(call => call[1]);
+  const pick = (h: Awaited<ReturnType<typeof setup>>, payload: ReplyPayload | undefined, model: string) =>
+    tokens(payload).find(token => h.actions.verify(token)!.command === `/model use ${modelChoiceKey({provider: 'p', model})}`)!;
+
+  it('records a Feishu switch in the live session and makes it the App default, on the clicked card', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    // A new shared session starts on the host default, not on a copy kept by the chat.
+    expect(h.policies[0]!.model).toBeUndefined();
+    await h.bridge.accept(event('/model'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(h.handles[0]!.setModelSelection).toHaveBeenCalledExactlyOnceWith({provider: 'p', model: 'n'});
+    expect(h.handles[0]!.checkpoint).toHaveBeenCalled();
+    expect(h.runtime.saveDefaultModel).toHaveBeenCalledExactlyOnceWith({provider: 'p', model: 'n'});
+    const [target, updated] = h.transport.updateFeedback.mock.calls.at(-1)!;
+    expect(target).toBe('om_card');
+    expect(JSON.stringify(updated)).toContain('当前模型：Model N');
+  });
+
+  it('shows and keeps a model picked in the App for the live session', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    h.handles[0]!.changeModelInApp!({provider: 'p', model: 'n'});
+    await h.bridge.accept(event('/model'));
+    expect(JSON.stringify(rich(h).at(-1))).toContain('当前模型：Model N');
+    // The next turn keeps the App's pick instead of forcing the chat's older copy back.
+    await h.bridge.accept(event('next'));
+    expect(h.handles[0]!.setModelSelection).not.toHaveBeenCalled();
+    expect(h.runtime.saveDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it('opens the saved session to record a switch made while it was idle', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.sweep(Date.now() + 365 * 24 * 60 * 60_000);
+    await h.bridge.accept(event('/model'));
+    // Showing the menu does not reopen the session.
+    expect(h.runtime.resume).not.toHaveBeenCalled();
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles[1]!.setModelSelection).toHaveBeenCalledExactlyOnceWith({provider: 'p', model: 'n'});
+  });
+
+  const level = (h: Awaited<ReturnType<typeof setup>>, payload: ReplyPayload | undefined, effort: string) =>
+    tokens(payload).find(token => h.actions.verify(token)!.command === `/thinking use ${thinkingChoiceKey(effort)}`)!;
+  const template = (payload: ReplyPayload) => payload.kind === 'card' ? (payload.card.header as {template: string}).template : undefined;
+
+  it('refreshes a thinking card instead of applying it after the App switched the live model', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/thinking'));
+    const card = rich(h).at(-1);
+    h.handles[0]!.changeModelInApp!({provider: 'p', model: 'n'});
+    await h.bridge.accept(callback(level(h, card, 'high')));
+    expect(h.handles[0]!.setModelSelection).not.toHaveBeenCalled();
+    const [target, refreshed] = h.transport.updateFeedback.mock.calls.at(-1)!;
+    expect(target).toBe('om_card');
+    expect(JSON.stringify(refreshed)).toContain('设置刚刚变化');
+    expect(JSON.stringify(refreshed)).toContain('当前模型：Model N');
+  });
+
+  it('refreshes a thinking card when reopening the idle session brings in a newer choice', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/thinking'));
+    const card = rich(h).at(-1);
+    await h.bridge.sweep(Date.now() + LATER);
+    // While it was idle, the session's own record moved on in the App.
+    h.hostRecord.model = 'n';
+    await h.bridge.accept(callback(level(h, card, 'high')));
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles[1]!.setModelSelection).not.toHaveBeenCalled();
+    const refreshed = h.transport.updateFeedback.mock.calls.at(-1)![1];
+    expect(template(refreshed)).toBe('blue');
+    expect(JSON.stringify(refreshed)).toContain('设置刚刚变化');
+  });
+
+  it('reports a pick that only the App default would hold when saving it fails', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    // No conversation yet: the pick can only live in the App default.
+    await h.bridge.accept(event('/model'));
+    h.runtime.saveDefaultModel!.mockRejectedValueOnce(new DshRuntimeError('MODEL_NOT_SAVED'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    const failed = h.transport.updateFeedback.mock.calls.at(-1)![1];
+    expect(template(failed)).toBe('red');
+    expect(JSON.stringify(failed)).toContain('没能保存');
+    // With a session the pick is recorded there, so a failed default save is only logged.
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/model'));
+    h.runtime.saveDefaultModel!.mockRejectedValueOnce(new DshRuntimeError('MODEL_NOT_SAVED'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(template(h.transport.updateFeedback.mock.calls.at(-1)![1])).toBe('green');
+    expect(h.audit).toHaveBeenCalledWith(expect.objectContaining({stage: 'model-default-unsaved'}));
+  });
+
+  it('closes and reopens the session before another turn when a pick was not saved', async () => {
+    const h = await setup({streaming: false, models: true, shared: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/model'));
+    h.handles[0]!.checkpoint.mockRejectedValueOnce(new DshRuntimeError('PERSISTENCE_FAILED'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(template(h.transport.updateFeedback.mock.calls.at(-1)![1])).toBe('red');
+    await h.bridge.accept(event('next'));
+    // The unconfirmed pick never drives a turn: that session was closed and the saved one reopened.
+    expect(h.handles[0]!.dispose).toHaveBeenCalled();
+    expect(h.runtime.resume).toHaveBeenCalledOnce();
+    expect(h.handles).toHaveLength(2);
+    expect(h.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the chat copy for a host that cannot share, and never touches the App default', async () => {
+    const h = await setup({streaming: false, models: true});
+    await h.bridge.accept(event('hello'));
+    await h.bridge.accept(event('/model'));
+    await h.bridge.accept(callback(pick(h, rich(h).at(-1), 'n')));
+    expect(h.handles[0]!.setModelSelection).toHaveBeenCalledExactlyOnceWith({provider: 'p', model: 'n'});
+    expect(h.runtime).not.toHaveProperty('saveDefaultModel');
+    await h.bridge.accept(event('/new'));
+    await h.bridge.accept(event('next topic'));
+    expect(h.policies.at(-1)).toMatchObject({provider: 'p', model: 'n'});
   });
 });

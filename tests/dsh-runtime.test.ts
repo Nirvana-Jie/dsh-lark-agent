@@ -1139,9 +1139,34 @@ describe('harness channel mode', () => {
     await expect(session.run('research', new AbortController().signal, undefined, {stream: event => events.push(event)})).resolves.toBe('answer');
     expect(events).toEqual([
       {type: 'attempt'}, {type: 'reasoning', text: 'think'},
-      {type: 'tool', callId: 'call_1', name: 'web_search', detail: 'Lody、LodyAI'},
+      {type: 'tool', callId: 'call_1', name: 'web_search', detail: 'Lody, LodyAI'},
       {type: 'tool-done', callId: 'call_1', ok: true},
       {type: 'attempt'}, {type: 'text', text: 'answer'},
+    ]);
+  });
+
+  it('names a call by its own description first, like the App, and reports a failed command exit code', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const events: unknown[] = [];
+    f.agent.followup.mockImplementation(() => {
+      f.emit(toolCall('call_1', 'bash', JSON.stringify({command: 'printf x > out.txt', description: '写入桌面审批测试文件'})));
+      f.emit(toolCall('call_2', 'bash', JSON.stringify({command: `ls ${'a'.repeat(200)}`})));
+      f.emit(toolCall('call_3', 'ask_user_question', JSON.stringify({questions: [{question: '继续吗？'}, {question: '用哪个？'}]})));
+      listener(f, 'tools/result')({callId: 'call_1'}, {isError: false, value: {kind: 'foreground', exitCode: 1}});
+      listener(f, 'tools/result')({callId: 'call_2'}, {isError: false, value: {kind: 'foreground', exitCode: 0}});
+      listener(f, 'tools/result')({callId: 'call_3'}, {isError: true});
+      f.text('done');
+    });
+    await session.run('go', new AbortController().signal, undefined, {stream: event => events.push(event)});
+    expect(events).toEqual([
+      {type: 'attempt'},
+      {type: 'tool', callId: 'call_1', name: 'bash', detail: '写入桌面审批测试文件'},
+      {type: 'tool', callId: 'call_2', name: 'bash', detail: `ls ${'a'.repeat(157)}…`, code: true},
+      {type: 'tool', callId: 'call_3', name: 'ask_user_question', detail: '继续吗？, 用哪个？'},
+      {type: 'tool-done', callId: 'call_1', ok: true, exitCode: 1},
+      {type: 'tool-done', callId: 'call_2', ok: true},
+      {type: 'tool-done', callId: 'call_3', ok: false},
     ]);
   });
 
@@ -1292,7 +1317,7 @@ describe('harness permission presets', () => {
     const f = fixture();
     const service = withPermissions(f);
     const session = await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
-    expect(session.permissionState!()).toEqual({current: 'workspace-write', options: [
+    expect(session.permissionState!()).toEqual({current: 'workspace-write', defaultPreset: 'workspace-write', options: [
       {id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改', description: '工作区内可写'}, {id: 'danger-full-access', name: '完全权限'},
     ]});
     session.setPermission!('danger-full-access');
@@ -1322,5 +1347,78 @@ describe('harness permission presets', () => {
     f.agent.whenIdle.mockImplementationOnce(async () => { try { session.setPermission!('read-only'); } catch (error) { busy = error; } });
     await session.run('work', new AbortController().signal);
     expect(busy).toMatchObject({code: 'BUSY'});
+  });
+});
+
+describe('harness model shared with the App', () => {
+  const ownerMemory = (): MemoryAccess => ({privateChat: true, list: vi.fn(async () => []), search: vi.fn(async () => []),
+    remember: vi.fn(async () => { throw new Error('unused'); }), forget: vi.fn(async () => false)});
+  const harness = (extra: Partial<AgentPolicy> = {}): AgentPolicy => ({...basePolicy, mode: 'harness', memory: ownerMemory(), ...extra});
+  /** The App host: a per-session model record, a request header and a default the selector saves. */
+  const appHost = (f: ReturnType<typeof fixture>, registered = true) => {
+    const record = {pending: null as unknown, lastUsed: null as unknown};
+    const live = {header: undefined as unknown};
+    const append = vi.fn((type: string, data: unknown) => { if (type === 'model/selection') record.pending = data; });
+    Object.assign(f.session, {requestHeader: () => live.header, append});
+    const stateOf = vi.fn((_session: unknown, key: string) => registered && key === 'modelSelection' ? record : undefined);
+    const saveSelection = vi.fn(async (_next: unknown) => undefined);
+    const original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(name => name === 'sessionProjections' ? {stateOf}
+      : name === 'agentDefaultModel' ? {currentSelection: f.currentSelection, saveSelection} : original(name));
+    return {record, live, append, saveSelection};
+  };
+
+  it('follows the session record like the App: its pick, else its last request, else the host default', async () => {
+    const f = fixture();
+    const host = appHost(f);
+    const session = await f.runtime.create(harness());
+    expect(session.sharesModelSelection).toBe(true);
+    expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'host-model'});
+    host.live.header = {config: {provider: 'host-provider', model: 'used-model', reasoningEffort: 'deep'}};
+    expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'used-model', reasoningEffort: 'deep'});
+    // An effort the adapter filled in itself stays unset, so the adapter keeps choosing it.
+    host.live.header = {config: {provider: 'host-provider', model: 'used-model', reasoningEffort: 'quick'}, adapterDefaults: {reasoningEffort: true}};
+    expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'used-model'});
+    // A pick made in the App on this session wins, and routes the next request.
+    host.record.pending = {provider: 'host-provider', model: 'app-pick', reasoningEffort: 'deep'};
+    expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'app-pick', reasoningEffort: 'deep'});
+    const assemble = f.scopedOn.mock.calls.find(([name]) => name === 'system-prompt/assemble')![1];
+    const request = f.scopedOn.mock.calls.find(([name]) => name === 'agent/request')![1];
+    await assemble({}, {}, async () => ({variables: {}}));
+    expect(await request({}, async () => ({provider: 'x', model: 'x', maxTokens: 10})))
+      .toEqual({provider: 'host-provider', model: 'app-pick', reasoningEffort: 'deep', maxTokens: 10});
+  });
+
+  it('records a Feishu pick in the session, where the App shows it', async () => {
+    const f = fixture();
+    const host = appHost(f);
+    const session = await f.runtime.create(harness());
+    session.setModelSelection!({provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
+    expect(host.append).toHaveBeenCalledExactlyOnceWith('model/selection', {provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
+    expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
+    expect(host.saveSelection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a fixed route for restricted chats, administrator routes and hosts without a session record', async () => {
+    for (const [policy, registered] of [[basePolicy, true], [harness({provider: 'admin', model: 'pinned'}), true], [harness(), false]] as const) {
+      const f = fixture();
+      const host = appHost(f, registered);
+      const session = await f.runtime.create(policy);
+      expect(session.sharesModelSelection).toBe(false);
+      session.setModelSelection!({provider: 'host-provider', model: 'other'});
+      expect(host.append).not.toHaveBeenCalled();
+      expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'other'});
+    }
+  });
+
+  it('saves the App default through the host service the selector uses', async () => {
+    const f = fixture();
+    expect(f.runtime.sharesModelSelection()).toBe(false);
+    const host = appHost(f);
+    expect(f.runtime.sharesModelSelection()).toBe(true);
+    await f.runtime.saveDefaultModel({provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
+    expect(host.saveSelection).toHaveBeenCalledExactlyOnceWith({provider: 'host-provider', model: 'host-model', reasoningEffort: 'deep'});
+    host.saveSelection.mockRejectedValueOnce(new Error('PRIVATE_CONFIG_PATH'));
+    await expect(f.runtime.saveDefaultModel({provider: 'host-provider', model: 'host-model'})).rejects.toMatchObject({code: 'MODEL_NOT_SAVED'});
   });
 });

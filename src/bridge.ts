@@ -29,6 +29,10 @@ export interface Runtime {
   catalog?(): Promise<ModelCatalog>;
   resolveModelSelection?(selection?: ModelSelection): Promise<ModelSelection>;
   permissionOptions?(): PermissionOption[];
+  /** Harness sessions share their model choice with the App (see RuntimeSession.sharesModelSelection). */
+  sharesModelSelection?(): boolean;
+  /** Make a choice the App's default for new sessions, as the App's model selector does. */
+  saveDefaultModel?(selection: ModelSelection): Promise<void>;
 }
 export interface BotState {
   sessions: Pick<SessionStore, 'current' | 'list' | 'add' | 'activate' | 'archive' | 'rename' | 'touch'>
@@ -85,6 +89,22 @@ const MAX_FILE_BYTES = 30 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_TEXT = '本次处理超时，已请求取消。请缩小问题范围后重试。';
 const STOPPING_TEXT = '连接正在关闭，本次处理已停止。';
+// Clicks on these panels update the clicked card itself; anything else answers with a new message.
+const IN_PLACE = /^\/(?:(?:model|thinking)(?: (?:use [a-f0-9]{16}|page [0-9]{1,4}))?|permission(?: use [a-z][a-z0-9-]{0,39})?|sessions|new|resume [a-f0-9]{12})$/;
+// A switch that finishes sooner goes straight to its result, without a loading frame.
+const PANEL_PROGRESS_DELAY_MS = 150;
+const STALE_SETTINGS = '设置刚刚变化，已刷新为最新选项，请重新选择。';
+
+/** The card's model settings changed after it was drawn, so its choice is not applied. */
+class StaleCardError extends Error {
+  constructor() { super('模型设置已变化，请重新打开模型或思考深度菜单后操作。'); }
+}
+
+function commandError(error: unknown): string {
+  return error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError
+    || error instanceof ModelPreferencesError || error instanceof StaleCardError
+    ? error.message : '操作未完成，请稍后重试；尚未确认保存成功。';
+}
 
 /** Only a regular file inside the user's own workspace is uploaded; anything else is just named. */
 async function uploadable(workspace: string, path: string): Promise<{path: string; image: boolean} | {reason: string}> {
@@ -113,6 +133,10 @@ interface Lane {
   lastUsed: number;
   generation: number;
   controller?: AbortController;
+  /** The live session's permission preset as last seen here; a different value was changed in the App. */
+  permissionSeen?: string;
+  /** Where this harness chat keeps its permission choice, so a change can be kept even while unloading. */
+  permissionContext?: {ownerKey: string; conversationKey: string};
 }
 const HELP = `直接把想做的事告诉我就好。
 
@@ -122,7 +146,7 @@ const HELP = `直接把想做的事告诉我就好。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
 const HARNESS_HELP = `
 
-这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或在 设置 → 模型 里点「权限模式」）可以切换权限，比如改成不再询问的「完全权限」。`;
+这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或点底部菜单 设置 → 权限模式）可以切换权限，比如改成不再询问的「完全权限」。模型、思考深度和权限模式与电脑上的 Harness 同步。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：归档当前会话，下一条消息开启新会话；长期记忆保留
 /sessions：选择以前的对话；/sessions detail 查看完整列表和 ID
@@ -345,15 +369,25 @@ export class BotBridge {
     }
     if (this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
     let text = message.text;
+    const inPlace = this.inPlace(message);
+    // A stale card is redrawn with the current state instead of answered with another message.
     if (message.expectedSessionId !== undefined) {
       const current = await this.state.sessions.current(this.sessionContext(message));
       if ((current?.id ?? null) !== message.expectedSessionId) {
+        if (inPlace) return this.refreshPanel(message, lane, '话题刚刚变化，已刷新为最新状态，请重新选择。');
         return this.reply(message, '这张卡片对应的会话状态已改变，请重新发送 /status 或 /sessions 后操作。');
       }
     }
     if (message.expectedModelRevision !== undefined) {
+      // A shared session may have been switched in the App after this card was drawn.
+      if (lane.session?.sharesModelSelection && !lane.unavailable) {
+        await this.mirrorModel(message, lane.session, await this.state.modelPreferences?.get(this.context(message)));
+      }
       const current = await this.state.modelPreferences?.get(this.context(message));
-      if ((current?.revision ?? null) !== message.expectedModelRevision) return this.reply(message, '模型设置已变化，请重新打开模型或思考深度菜单后操作。');
+      if ((current?.revision ?? null) !== message.expectedModelRevision) {
+        if (inPlace) return this.refreshPanel(message, lane, STALE_SETTINGS);
+        return this.reply(message, new StaleCardError().message);
+      }
     }
     if (this.state.artifacts && (/^\/(?:result|publish|answer) [a-f0-9]{12}$/.test(text) || text === '/results')) {
       try {
@@ -377,6 +411,7 @@ export class BotBridge {
       } catch (error) {if (error instanceof ArtifactDeliveryError) throw error; return this.reply(message, error instanceof PresentationError ? error.message : '作品暂时无法读取，已有内容会保留。');}
     }
     if (text.startsWith('/')) {
+      if (inPlace) return this.panelInPlace(message, lane);
       const feedback = this.commandFeedback(message);
       let response: string;
       let panel: ReplyPanel | undefined;
@@ -387,8 +422,7 @@ export class BotBridge {
       }
       catch (error) {
         failed = true;
-        response = error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError
-          ? error.message : '操作未完成，请稍后重试；尚未确认保存成功。';
+        response = commandError(error);
         this.audit({stage: 'command-failed', messageId: message.messageId});
       }
       const payload = panel ? renderPanel(panel) : renderPanel({title: failed ? '暂时未完成' : '已处理',
@@ -424,8 +458,11 @@ export class BotBridge {
         const candidate = new LiveReply(this.liveTransport()!, {messageId: message.messageId, inThread: Boolean(message.threadId),
           idempotencyKey: createHash('sha256').update(JSON.stringify([this.config.botOpenId, message.requestId ?? message.messageId, 'live'])).digest('hex').slice(0, 48)},
         {audit: stage => this.audit({stage, messageId: message.messageId})});
-        if (await candidate.open()) live = candidate;
-        else this.liveUnavailableUntil = Date.now() + LIVE_RETRY_MS;
+        if (await candidate.open()) {
+          live = candidate;
+          // Under the answer: what this reply runs with. Names may wait for the model catalog.
+          void this.settingsLine(lane).then(line => { if (line) candidate.setFooter(line); }, () => undefined);
+        } else this.liveUnavailableUntil = Date.now() + LIVE_RETRY_MS;
       }
       const turnContext = {memoryText, ...(artifactsText ? {artifactsText} : {})};
       // Only the owner's harness-mode chat can be asked anything; a restricted session gets no hooks at all.
@@ -481,6 +518,21 @@ export class BotBridge {
     }
   }
 
+  /** The model, thinking depth and permission mode a reply runs with, by name. */
+  private async settingsLine(lane: Lane): Promise<string | undefined> {
+    const session = lane.session;
+    const selection = session?.modelSelection?.();
+    if (!session || !selection) return;
+    const catalog = await this.runtime.catalog?.().catch(() => undefined);
+    const model = catalog?.models.find(item => item.provider === selection.provider && item.model === selection.model);
+    const efforts = model?.reasoning?.efforts ?? [];
+    const effort = selection.reasoningEffort ? efforts.find(item => item.id === selection.reasoningEffort)?.name ?? selection.reasoningEffort
+      : efforts.length ? '模型默认' : undefined;
+    const permission = session.permissionState?.();
+    const preset = permission && (permission.options.find(option => option.id === permission.current)?.name ?? (permission.current === 'custom' ? '自定义' : permission.current));
+    return [model?.name ?? selection.model, effort && `思考深度 ${effort}`, preset && `权限 ${preset}`].filter(Boolean).join(' · ');
+  }
+
   /** Whether this message's reply streams into a live card, which makes the typing reaction redundant. */
   private streams(message: RoutedMessage, user: UserPolicy): boolean {
     return message.chatType === 'p2p' && user.directMode === 'harness' && this.config.streamingCards && this.config.responseMode !== 'text'
@@ -515,8 +567,9 @@ export class BotBridge {
     if (!card) { pending.cancel(); return false; }
     const outcome = await pending.result;
     const allowed = outcome.kind === 'answer' && outcome.value;
-    await this.closeInteraction(card, approvalCard(prompt, undefined, outcome.kind === 'answer' ? (allowed ? '已允许这一次。' : '已拒绝，这次不会执行。')
-      : outcome.kind === 'timeout' ? '5 分钟内没有确认，已按拒绝处理。' : '本次处理已停止，没有执行。'));
+    await this.closeInteraction(card, approvalCard(prompt, undefined, outcome.kind === 'answer'
+      ? (allowed ? {text: '已允许这一次。', tone: 'success'} : {text: '已拒绝，这次不会执行。', tone: 'error'})
+      : {text: outcome.kind === 'timeout' ? '5 分钟内没有确认，已按拒绝处理。' : '本次处理已停止，没有执行。', tone: 'muted'}));
     return allowed;
   }
 
@@ -533,8 +586,8 @@ export class BotBridge {
     const card = await this.openInteraction(message, id, questionCard(questions, tokens));
     if (!card) { pending.cancel(); throw new Error(unavailable); }
     const outcome = await pending.result;
-    await this.closeInteraction(card, questionCard(questions, undefined, outcome.kind === 'answer' ? answeredText(questions, outcome.value)
-      : outcome.kind === 'timeout' ? '10 分钟内没有回答，已按未回答继续。' : '本次处理已停止，提问已关闭。'));
+    await this.closeInteraction(card, questionCard(questions, undefined, outcome.kind === 'answer' ? {text: answeredText(questions, outcome.value), tone: 'success'}
+      : {text: outcome.kind === 'timeout' ? '10 分钟内没有回答，已按未回答继续。' : '本次处理已停止，提问已关闭。', tone: 'muted'}));
     if (outcome.kind !== 'answer') throw new Error(outcome.kind === 'timeout' ? '主人没有在 10 分钟内回答。' : '提问已取消。');
     return outcome.value;
   }
@@ -621,6 +674,59 @@ export class BotBridge {
     if (notes.length) await this.reply(message, `有 ${notes.length} 个文件没有发到这里：\n${notes.join('\n')}`, signal);
   }
 
+  /** A private-chat click on a settings or topic panel, which can update the clicked card. */
+  private inPlace(message: RoutedMessage): boolean {
+    return message.chatType === 'p2p' && Boolean(message.requestId?.startsWith('card:')) && this.config.responseMode !== 'text'
+      && Boolean(this.transport.updateFeedback) && IN_PLACE.test(message.text);
+  }
+
+  /**
+   * Run a panel click and show its progress and result on the clicked card. That
+   * card exists, so a failed progress frame never holds back the result, and an
+   * unconfirmed update is never followed by another message.
+   */
+  private async panelInPlace(message: RoutedMessage, lane: Lane): Promise<void> {
+    const target = message.messageId;
+    const mutation = /^\/(?:(?:model|thinking|permission) use |resume |new$)/.test(message.text);
+    const progress = mutation ? await this.commandPanel(message, lane, {pending: true}).catch(() => undefined) : undefined;
+    const feedback = new CommandFeedback(async () => {
+      if (progress && !this.stopped) {
+        try { await this.transport.updateFeedback!(target, renderPanel(progress)); }
+        catch { this.audit({stage: 'panel-progress-failed', messageId: target}); }
+      }
+      return target;
+    }, (_id, payload) => this.transport.updateFeedback!(target, payload), PANEL_PROGRESS_DELAY_MS);
+    let panel: ReplyPanel | undefined, response: string, failed = false;
+    try {
+      response = await this.command(message, lane);
+      panel = await this.commandPanel(message, lane);
+    } catch (error) {
+      // A card that went stale while it ran is refreshed, not reported as a failure.
+      const stale = error instanceof StaleCardError;
+      failed = !stale;
+      response = stale ? STALE_SETTINGS : commandError(error);
+      if (failed) this.audit({stage: 'command-failed', messageId: message.messageId});
+      panel = await this.commandPanel(message, lane, stale ? {notice: response} : {error: response}).catch(() => undefined);
+      if (stale && !panel) panel = {title: '卡片已过期', tone: 'muted', status: {text: response, tone: 'muted'}, summary: response, sections: []};
+    }
+    const payload = renderPanel(this.stopped ? {title: '连接正在关闭', tone: 'muted', summary: '连接恢复后可重新打开设置，已保存的选择保留',
+      sections: [{text: '连接恢复后可重新打开菜单。已保存的选择会保留。'}]}
+      : panel ?? {title: failed ? '暂时未完成' : '已处理', tone: failed ? 'error' : 'success', status: {text: response, tone: failed ? 'error' : 'success'},
+        summary: response, sections: []});
+    try {
+      await feedback.finish(payload, () => this.transport.updateFeedback!(target, payload));
+      this.audit({stage: 'panel-updated', messageId: target});
+    } catch { this.audit({stage: 'panel-update-failed', messageId: target}); }
+  }
+
+  /** Redraw a stale card with the current state, without running its command. */
+  private async refreshPanel(message: RoutedMessage, lane: Lane, notice: string): Promise<void> {
+    const panel = await this.commandPanel(message, lane, {notice}).catch(() => undefined);
+    const payload = renderPanel(panel ?? {title: '卡片已过期', tone: 'muted', status: {text: notice, tone: 'muted'}, summary: notice, sections: []});
+    try { await this.transport.updateFeedback!(message.messageId, payload); this.audit({stage: 'panel-refreshed', messageId: message.messageId}); }
+    catch { this.audit({stage: 'panel-update-failed', messageId: message.messageId}); }
+  }
+
   private commandFeedback(message: RoutedMessage): CommandFeedback | undefined {
     // Private controls contain no model-generated output. Group replies retain
     // their existing authorization gate and native typing reaction.
@@ -696,23 +802,24 @@ export class BotBridge {
     // ownership and only allow recovery after a subsequent confirmed close.
     if (lane.unavailable) await this.unload(lane);
     if (lane.session) {
-      if (modelPreference && lane.session.modelSelection && !sameSelection(lane.session.modelSelection(), modelPreference.selection)) {
+      // A session that shares its model with the App follows its own record instead of the chat's copy.
+      if (!lane.session.sharesModelSelection && modelPreference && lane.session.modelSelection && !sameSelection(lane.session.modelSelection(), modelPreference.selection)) {
         if (lane.session.setModelSelection) lane.session.setModelSelection(modelPreference.selection);
         else await this.unload(lane);
       }
-      if (lane.session) return;
+      if (lane.session) { await this.adoptPermission(lane); return; }
     }
     const context = this.sessionContext(message);
     const saved = await this.state.sessions.current(context);
+    // Like the App: a shared session starts on the host default and resumes on its own record.
+    const selection = this.sharedModel(message, lane) ? undefined : modelPreference?.selection;
     const handle = saved
-      ? await this.runtime.resume(this.policy(message, lane, modelPreference?.selection), saved.nativeId)
-      : await this.runtime.create(this.policy(message, lane, modelPreference?.selection));
+      ? await this.runtime.resume(this.policy(message, lane, selection), saved.nativeId)
+      : await this.runtime.create(this.policy(message, lane, selection));
     try {
       await handle.checkpoint();
-      await this.applyPermission(message, lane, handle);
-      if (!modelPreference && handle.modelSelection && this.state.modelPreferences) {
-        await this.state.modelPreferences.set(this.context(message), handle.modelSelection(), {expectedRevision: null});
-      }
+      await this.applyPermission(message, lane, handle, !saved);
+      await this.mirrorModel(message, handle, modelPreference);
       // Publish a route only after even the empty native log is durable, and
       // before submitting the first prompt. An abandoned creation has no work.
       lane.saved = saved ? await this.bindRestoredSession(context, saved, handle)
@@ -737,6 +844,8 @@ export class BotBridge {
   private async unload(lane: Lane): Promise<void> {
     const handle = lane.session;
     if (!handle) {lane.unavailable = false; return;}
+    // Keep a preset changed in the App before this session goes away (/new, /resume, idle sweep).
+    await this.adoptPermission(lane).catch(() => this.audit({stage: 'permission-adopt-failed'}));
     lane.unavailable = true;
     try {
       await handle.dispose();
@@ -796,11 +905,11 @@ export class BotBridge {
       if (!lane.unavailable && lane.session && lane.saved?.id === target.id) return `已经在会话「${target.title}」中。`;
       await this.unload(lane);
       const preference = await this.state.modelPreferences?.get(context);
-      const handle = await this.runtime.resume(this.policy(message, lane, preference?.selection), target.nativeId);
+      const handle = await this.runtime.resume(this.policy(message, lane, this.sharedModel(message, lane) ? undefined : preference?.selection), target.nativeId);
       try {
         await handle.checkpoint();
-        await this.applyPermission(message, lane, handle);
-        if (!preference && handle.modelSelection && this.state.modelPreferences) await this.state.modelPreferences.set(context, handle.modelSelection(), {expectedRevision: null});
+        await this.applyPermission(message, lane, handle, false);
+        await this.mirrorModel(message, handle, preference);
         await this.bindRestoredSession(conversation, target, handle);
         lane.saved = await this.state.sessions.activate(conversation, target.id);
         lane.session = handle;
@@ -856,6 +965,22 @@ export class BotBridge {
     return message.chatType === 'p2p' && lane.user.directMode === 'harness';
   }
 
+  /**
+   * The owner's harness chat on the App host shares model and thinking depth
+   * with the App, like any App session; an administrator's fixed route does not.
+   */
+  private sharedModel(message: RoutedMessage, lane: Lane): boolean {
+    return this.harness(message, lane) && Boolean(this.runtime.sharesModelSelection?.()) && !(this.config.provider && this.config.model);
+  }
+
+  /** Record what an opened session runs as the chat's copy: the first capture, or a shared session's own record. */
+  private async mirrorModel(message: RoutedMessage, handle: RuntimeSession, preference: ModelPreferenceRecord | undefined): Promise<void> {
+    if (!handle.modelSelection || !this.state.modelPreferences || (preference && !handle.sharesModelSelection)) return;
+    const selection = handle.modelSelection();
+    if (preference && sameSelection(preference.selection, selection)) return;
+    await this.state.modelPreferences.set(this.context(message), selection, {expectedRevision: preference?.revision ?? null});
+  }
+
   /** The host's presets, from the live session when there is one. Undefined when the host offers none. */
   private permissionView(lane: Lane): PermissionView | undefined {
     const live = lane.session?.permissionState?.();
@@ -867,6 +992,7 @@ export class BotBridge {
   /** What this chat runs: the live session's preset, else the chat's saved choice. */
   private async permissionChoice(message: RoutedMessage, lane: Lane): Promise<PermissionView | undefined> {
     if (lane.unavailable) await this.unload(lane);
+    await this.adoptPermission(lane);
     const view = this.permissionView(lane);
     if (!view) return;
     if (view.current) return view;
@@ -876,7 +1002,7 @@ export class BotBridge {
 
   /** Owner-only: switch this private chat's Harness permission preset, like the App's selector. */
   private async permissionCommand(message: RoutedMessage, lane: Lane, args: string): Promise<string> {
-    if (!this.harness(message, lane)) return '权限模式只能在你和我的私聊里切换。';
+    if (!this.harness(message, lane)) return message.chatType === 'p2p' ? '这个私聊使用管理员配置的助手，没有可切换的权限模式。' : '权限模式只能在你和我的私聊里切换。';
     const view = await this.permissionChoice(message, lane);
     if (!view) throw new DshRuntimeError('PERMISSION_UNAVAILABLE');
     if (!args) return permissionStateText(view);
@@ -885,17 +1011,33 @@ export class BotBridge {
     if (!option) return '请通过权限模式卡片选择，或发送 /permission 查看可用选项。';
     // Save first: a later session in this chat starts in the chosen mode even if the live switch fails.
     await this.state.permissionPreferences?.set(this.context(message), option.id);
-    lane.session?.setPermission?.(option.id);
+    if (lane.session?.setPermission) {
+      lane.session.setPermission(option.id);
+      lane.permissionSeen = option.id;
+    }
     message.permissionChanged = true;
-    return `已切换为「${option.name}」。这个私聊里的对话都会使用它；电脑上其他会话不受影响。`;
+    return `已切换为「${option.name}」。这个私聊里的对话都会使用它，电脑上打开这段对话也会看到同样的模式。`;
   }
 
-  /** Bring a newly opened harness session to the chat's saved permission preset. */
-  private async applyPermission(message: RoutedMessage, lane: Lane, handle: RuntimeSession): Promise<void> {
+  /** Bring a newly opened harness session to the chat's choice, or a new one without a choice to the App's default. */
+  private async applyPermission(message: RoutedMessage, lane: Lane, handle: RuntimeSession, fresh: boolean): Promise<void> {
     if (!this.harness(message, lane) || !handle.setPermission) return;
-    const saved = await this.state.permissionPreferences?.get(this.context(message));
-    const state = saved ? handle.permissionState?.() : undefined;
-    if (state && state.current !== saved && state.options.some(option => option.id === saved)) handle.setPermission(saved!);
+    const {ownerKey, conversationKey} = this.context(message);
+    lane.permissionContext = {ownerKey, conversationKey};
+    const saved = await this.state.permissionPreferences?.get(lane.permissionContext);
+    const state = handle.permissionState?.();
+    // The App's own new sessions start on its default preset; a resumed one keeps what it recorded.
+    const target = saved ?? (fresh ? state?.defaultPreset : undefined);
+    if (state && target && state.current !== target && state.options.some(option => option.id === target)) handle.setPermission(target);
+    lane.permissionSeen = handle.permissionState?.()?.current;
+  }
+
+  /** A preset changed in the App on this chat's live session becomes the chat's choice, so new sessions keep it. */
+  private async adoptPermission(lane: Lane): Promise<void> {
+    const live = lane.permissionContext ? lane.session?.permissionState?.() : undefined;
+    if (!live || live.current === lane.permissionSeen) return;
+    lane.permissionSeen = live.current;
+    if (live.options.some(option => option.id === live.current)) await this.state.permissionPreferences?.set(lane.permissionContext!, live.current);
   }
 
   private async modelState(message: RoutedMessage, lane: Lane): Promise<ModelView> {
@@ -905,6 +1047,17 @@ export class BotBridge {
     const catalog = await this.runtime.catalog();
     const context = this.context(message);
     let preference = await this.state.modelPreferences.get(context);
+    if (this.sharedModel(message, lane)) {
+      // As in the App: the live session's own record; without one, what this chat last ran,
+      // and for a chat that will start a new session, the host default.
+      const live = lane.session?.sharesModelSelection ? lane.session.modelSelection?.() : undefined;
+      const fresh = !live && !await this.state.sessions.current(this.sessionContext(message));
+      const selection = live ?? (fresh || !preference ? catalog.defaultSelection ?? await this.runtime.resolveModelSelection() : preference.selection);
+      if (!preference || !sameSelection(preference.selection, selection)) {
+        preference = await this.state.modelPreferences.set(context, selection, {expectedRevision: preference?.revision ?? null});
+      }
+      return message.modelView = {catalog, selection: preference.selection, preference};
+    }
     if (!preference) {
       let selection = lane.session?.modelSelection?.();
       if (!selection) {
@@ -929,17 +1082,40 @@ export class BotBridge {
   }
 
   private async modelCommand(message: RoutedMessage, lane: Lane, kind: 'model' | 'thinking', args: string): Promise<string> {
+    const shared = this.sharedModel(message, lane);
+    const match = /^use ([a-f0-9]{16})$/.exec(args);
+    // Like the App's selector, a pick goes into this chat's own session, so open it first.
+    if (match && shared && !lane.session && await this.state.sessions.current(this.sessionContext(message))) {
+      await this.ensureSession(message, lane);
+      message.modelView = undefined;
+    }
     const state = await this.modelState(message, lane);
     if (!args || args === 'current' || /^page [0-9]{1,4}$/.test(args)) return modelStateText(state.selection, state.catalog);
-    const match = /^use ([a-f0-9]{16})$/.exec(args);
     if (!match) return `请通过菜单选择，或发送 /${kind} 查看当前可用选项。`;
+    // Reopening the session may have brought in a choice made in the App since the card was drawn.
+    if (message.expectedModelRevision !== undefined && state.preference.revision !== message.expectedModelRevision) throw new StaleCardError();
     let candidate = kind === 'model' ? modelChoice(state.catalog, match[1]!) : thinkingChoice(state.catalog, state.selection, match[1]!);
     if (!candidate) throw new DshRuntimeError('INVALID_MODEL_SELECTION');
     if (kind === 'model' && candidate.provider === state.selection.provider && candidate.model === state.selection.model) candidate = state.selection;
     const selection = await this.runtime.resolveModelSelection!(candidate);
     if (!sameSelection(selection, state.selection)) {
       const saved = await this.state.modelPreferences!.set(this.context(message), selection, {expectedRevision: state.preference.revision});
-      if (lane.session) {
+      if (shared) {
+        // Recorded in the session, then made the App's default for new sessions, as the App's selector does.
+        const recorded = Boolean(lane.session?.sharesModelSelection);
+        if (recorded) {
+          lane.session!.setModelSelection!(saved.selection);
+          // An unconfirmed pick must not drive another turn: the session is closed and reopened first.
+          try { await lane.session!.checkpoint(); }
+          catch (error) { lane.unavailable = true; throw error; }
+        }
+        try { await this.runtime.saveDefaultModel?.(saved.selection); }
+        catch (error) {
+          // Without a session holding the pick, the App default is the only place it lives.
+          if (!recorded) throw error;
+          this.audit({stage: 'model-default-unsaved', messageId: message.messageId});
+        }
+      } else if (lane.session) {
         if (lane.session.setModelSelection) {
           try {lane.session.setModelSelection(saved.selection);}
           catch {await this.unload(lane);}
@@ -948,17 +1124,26 @@ export class BotBridge {
       message.modelView = {catalog: state.catalog, selection: saved.selection, preference: saved};
     }
     message.modelChanged = true;
-    return `设置已保存，下一条回复生效。\n${modelStateText(selection, state.catalog)}\n已有对话保留，只影响你在当前聊天中的选择。`;
+    return shared ? `设置已保存，下一条回复生效。\n${modelStateText(selection, state.catalog)}\n已有对话保留；电脑上的 Harness 也会用这个设置。`
+      : `设置已保存，下一条回复生效。\n${modelStateText(selection, state.catalog)}\n已有对话保留，只影响你在当前聊天中的选择。`;
   }
 
-  private async commandPanel(message: RoutedMessage, lane: Lane): Promise<ReplyPanel | undefined> {
+  /**
+   * The management card for a command. `card` describes a click being shown on
+   * its own card: the switch in flight, its refusal, or a refresh of a stale card.
+   */
+  private async commandPanel(message: RoutedMessage, lane: Lane,
+    card?: {pending?: boolean; error?: string; notice?: string}): Promise<ReplyPanel | undefined> {
     const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(message.text);
     const command = match?.[1]?.toLowerCase(), args = (match?.[2] ?? '').trim();
+    const choice = /^use (\S+)$/.exec(args)?.[1];
+    const pending = card?.pending ? choice : undefined;
     const interactive = this.cardActionsReady && this.config.cardInteractions && Boolean(this.state.actions);
     const issue = (target: string, extra: Partial<Parameters<NonNullable<BotState['actions']>['issue']>[0]> = {}) => this.state.actions!.issue({
       ownerId: message.senderId, chatId: message.chatId, chatType: message.chatType, threadId: message.threadId,
       sourceMessageId: message.messageId, command: target, ...extra});
-    if ((command === 'model' || command === 'thinking') && (!args || /^page [0-9]{1,4}$/.test(args) || message.modelChanged)) {
+    if ((command === 'model' || command === 'thinking') && (!args || /^page [0-9]{1,4}$/.test(args) || message.modelChanged || card)) {
+      if (card?.pending && !pending) return;
       const state = await this.modelState(message, lane);
       const current = await this.state.sessions.current(this.sessionContext(message));
       const panel = modelControlPanel(command, state.catalog, state.selection, (label, target, mutation, primary) => {
@@ -966,38 +1151,50 @@ export class BotBridge {
         const token = issue(target, {expectedSessionId: current?.id ?? null,
           ...(mutation ? {expectedModelRevision: state.preference?.revision ?? null} : {})});
         return {label, value: {token}, primary};
-      }, /^page /.test(args) ? Number(args.slice(5)) : 0, message.modelChanged);
-      // The settings menu reaches the permission switch from here, without another menu entry.
-      if (interactive && this.harness(message, lane) && this.permissionView(lane)) panel.actions = [...panel.actions ?? [], {label: '权限模式', value: {token: issue('/permission')}}];
+      }, {...(/^page /.test(args) ? {page: Number(args.slice(5))} : {}), changed: message.modelChanged, pending, error: card?.error, notice: card?.notice});
+      // The settings menu reaches the permission switch from here too.
+      if (interactive && this.harness(message, lane) && this.permissionView(lane)) panel.actions = [...panel.actions ?? [],
+        pending ? {label: '权限模式', value: {}, disabled: true} : {label: '权限模式', value: {token: issue('/permission')}}];
       return panel;
     }
-    if (command === 'permission' && (!args || message.permissionChanged) && this.harness(message, lane)) {
+    if (command === 'permission' && (!args || message.permissionChanged || card) && this.harness(message, lane)) {
+      if (card?.pending && !pending) return;
       const view = await this.permissionChoice(message, lane);
       if (!view) return;
       return permissionPanel(view, (label, target, primary, confirm) => interactive
-        ? {label, value: {token: issue(target)}, primary, ...(confirm ? {confirm} : {})} : undefined, message.permissionChanged);
+        ? {label, value: {token: issue(target)}, primary, ...(confirm ? {confirm} : {})} : undefined,
+      {changed: message.permissionChanged, pending, error: card?.error, notice: card?.notice});
     }
     // Ordinary conversation and diagnostics stay out of management cards.
     // A card is useful here because the user explicitly wants to pick a topic.
-    if (command !== 'sessions' || args === 'detail') return;
+    const topic = card && (command === 'resume' || command === 'new');
+    if ((command !== 'sessions' || args === 'detail') && !topic) return;
     const conversation = this.sessionContext(message);
     const current = await this.state.sessions.current(conversation);
     const sessions = await this.state.sessions.list(conversation);
     if (!sessions.length) return;
+    const busy = Boolean(card?.pending);
+    const target = command === 'resume' ? sessions.find(s => s.id === args) : undefined;
+    const status: ReplyPanel['status'] = card?.error ? {text: card.error, tone: 'error'}
+      : busy ? {text: target ? `正在切换到「${preview(target.title, 40)}」…` : '正在开始新话题…', tone: 'pending'}
+      : topic && command === 'resume' && target ? {text: `已切换到「${preview(target.title, 40)}」，可以接着聊了。`, tone: 'success'}
+      : topic ? {text: '好，换个话题。直接发消息就会开始新的对话，之前的还在这里。', tone: 'success'}
+      : card?.notice ? {text: card.notice} : undefined;
     const actions: ReplyAction[] = [];
-    const add = (label: string, target: string, options: {primary?: boolean; confirm?: ReplyAction['confirm']; expectedSessionId?: string | null} = {}) => {
+    const add = (label: string, command: string, options: {confirm?: ReplyAction['confirm']; expectedSessionId?: string | null} = {}) => {
+      if (busy) { actions.push({label, value: {}, disabled: true}); return; }
       if (!interactive) return;
       const token = this.state.actions!.issue({ownerId: message.senderId, chatId: message.chatId,
         chatType: message.chatType, threadId: message.threadId, sourceMessageId: message.messageId,
-        command: target, ...(options.expectedSessionId === undefined ? {} : {expectedSessionId: options.expectedSessionId})});
-      actions.push({label, value: {token}, primary: options.primary, confirm: options.confirm});
+        command, ...(options.expectedSessionId === undefined ? {} : {expectedSessionId: options.expectedSessionId})});
+      actions.push({label, value: {token}, confirm: options.confirm});
     };
     for (const session of sessions.filter(s => s.id !== current?.id).slice(0, 5)) add(`继续 ${preview(session.title, 14)}`, `/resume ${session.id}`,
       {expectedSessionId: current?.id ?? null, confirm: {title: '接着这个话题聊？', text: `继续「${preview(session.title, 40)}」，现在的对话会保留。`}});
-    add('换个话题', '/new', {expectedSessionId: current?.id ?? null,
+    if (current) add('换个话题', '/new', {expectedSessionId: current.id,
       confirm: {title: '开始新话题？', text: '之前的对话会保留，需要时可以再找回来。'}});
-    return {title: '以前的对话', subtitle: '选一个话题，接着聊',
-      summary: '选择以前的话题继续，或开始一段新对话', actions,
+    return {title: '以前的对话', subtitle: '选一个话题，接着聊', tone: status?.tone ?? 'normal', ...(status ? {status} : {}),
+      summary: status?.text ?? '选择以前的话题继续，或开始一段新对话', actions,
       sections: sessions.slice(0, 5).map(s => ({title: preview(s.title, 40), text: s.id === current?.id ? '正在聊这个话题' : '可以接着聊'})),
       ...(!interactive || sessions.length > 5 ? {note: '完整列表和更多操作：/sessions detail'} : {}),
     };
@@ -1156,6 +1353,8 @@ export class BotBridge {
     await Promise.all([...this.lanes.values()].map(lane => lane.tail));
     await this.sweepTail;
     await this.progress.drain();
+    // Shutdown disposes sessions directly; keep presets changed in the App first.
+    await Promise.allSettled([...this.lanes.values()].map(lane => this.adoptPermission(lane)));
     const sessions = new Set([...this.failedDisposals, ...[...this.lanes.values()].flatMap(lane => lane.session ? [lane.session] : [])]);
     const results = await Promise.allSettled([...sessions].map(session => session.dispose()));
     if (results.some(result => result.status === 'rejected')) throw new Error('Some dsh sessions did not dispose successfully.');

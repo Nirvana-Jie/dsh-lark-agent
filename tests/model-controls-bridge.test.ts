@@ -225,12 +225,13 @@ describe('model controls through the verified bridge', () => {
     }
   });
 
-  it('preserves explicit thinking when selecting the already current model', async () => {
+  it('shows the current model without a button and keeps explicit thinking when it is chosen again', async () => {
     const h = await setup();
     await h.bridge.accept(event('hello'));
     const initial = await h.modelPreferences.get(h.context());
     await h.bridge.accept(event('/model'));
-    await h.bridge.accept(callback(h.button(`/model use ${modelChoiceKey(A)}`)));
+    expect(tokens(h.latest()).map(token => h.actions.verify(token)?.command)).not.toContain(`/model use ${modelChoiceKey(A)}`);
+    await h.bridge.accept(event(`/model use ${modelChoiceKey(A)}`));
     expect(await h.modelPreferences.get(h.context())).toEqual(initial);
     expect(h.runtime.handles[0]!.setModelSelection).not.toHaveBeenCalled();
   });
@@ -252,7 +253,6 @@ describe('model controls through the verified bridge', () => {
     visit(payload.card);
     expect(labels[0]).toMatch(/^✓ Provider A · DeepSeek Harness/);
     expect(labels[1]).toMatch(/^Provider B · DeepSeek Harness/);
-    expect(h.actions.verify(h.button(`/model use ${modelChoiceKey(A)}`))?.command).toBe(`/model use ${modelChoiceKey(A)}`);
     expect(h.actions.verify(h.button(`/model use ${modelChoiceKey(B)}`))?.command).toBe(`/model use ${modelChoiceKey(B)}`);
   });
 
@@ -377,7 +377,8 @@ describe('model controls through the verified bridge', () => {
     await h.bridge.accept(event('/model'));
     const original = await h.modelPreferences.get(h.context());
     const commands = () => tokens(h.latest()).map(token => h.actions.verify(token)?.command);
-    expect(commands().filter(command => command?.startsWith('/model use '))).toHaveLength(5);
+    // Five on the page, the current one shown without a button.
+    expect(commands().filter(command => command?.startsWith('/model use '))).toHaveLength(4);
     await h.bridge.accept(callback(h.button('/model page 1')));
     expect(commands().filter(command => command?.startsWith('/model use '))).toHaveLength(2);
     expect(commands()).toContain('/model page 0');
@@ -391,7 +392,7 @@ describe('model controls through the verified bridge', () => {
     h.catalogValue.models[0]!.reasoning!.efforts.push(...Array.from({length: 5}, (_, index) => ({id: `extra-${index}`, name: `Extra ${index}`})));
     await h.bridge.accept(event('/thinking'));
     const commands = () => tokens(h.latest()).map(token => h.actions.verify(token)?.command);
-    expect(commands().filter(command => command?.startsWith('/thinking use '))).toHaveLength(6);
+    expect(commands().filter(command => command?.startsWith('/thinking use '))).toHaveLength(5);
     await h.bridge.accept(callback(h.button('/thinking page 1')));
     expect(commands().filter(command => command?.startsWith('/thinking use '))).toEqual([`/thinking use ${thinkingChoiceKey('extra-4')}`]);
     expect(commands()).toContain('/thinking page 0');
@@ -780,41 +781,84 @@ describe('delayed command feedback through the bridge', () => {
     expect(h.delivered).toEqual([]);
   });
 
-  it('updates loading after a signed model switch and consumes the mutation only once', async () => {
+  it('switches on the clicked card: a loading frame while a slow switch runs, then the green result, once', async () => {
     const h = await setup();
     await h.bridge.accept(event('/model'));
     const token = h.button(`/model use ${modelChoiceKey(B)}`), originalDeliveries = h.delivered.length;
-    const feedback = feedbackTransport(h), catalog = slowCatalog(h), save = vi.spyOn(h.modelPreferences, 'set');
+    const feedback = feedbackTransport(h), save = vi.spyOn(h.modelPreferences, 'set');
+    const entered = deferred(), held = gate();
+    const resolveSelection = h.runtime.resolveModelSelection.getMockImplementation()!;
+    h.runtime.resolveModelSelection.mockImplementationOnce(async selection => {entered.resolve(); await held.promise; return resolveSelection(selection);});
+    const template = (payload: ReplyPayload) => payload.kind === 'card' ? (payload.card.header as {template: string}).template : undefined;
     vi.useFakeTimers();
     const running = h.bridge.accept(callback(token));
-    await catalog.entered;
+    await entered.promise;
     await vi.advanceTimersByTimeAsync(200);
-    expect(feedback.createFeedback.mock.calls[0]![0]).toEqual({messageId: 'om_model_card', inThread: false});
-    expect(text(feedback.createFeedback.mock.calls[0]![1])).toContain('正在切换设置');
-    catalog.release(); await running;
+    // No second card: the clicked one shows the switch in progress, with nothing clickable.
+    expect(feedback.createFeedback).not.toHaveBeenCalled();
+    expect(feedback.updateFeedback).toHaveBeenCalledTimes(1);
+    const [target, loading] = feedback.updateFeedback.mock.calls[0]!;
+    expect(target).toBe('om_model_card');
+    expect(text(loading)).toContain('正在切换到「模型 Beta」');
+    expect(tokens(loading)).toEqual([]);
+    expect(template(loading)).toBe('wathet');
+    held.resolve(); await running;
+    expect(feedback.updateFeedback).toHaveBeenCalledTimes(2);
+    const [finalTarget, final] = feedback.updateFeedback.mock.calls[1]!;
+    expect(finalTarget).toBe('om_model_card');
+    expect(template(final)).toBe('green');
+    expect(text(final)).toContain('已切换');
+    expect(text(final)).toContain('模型 Beta');
+    expect(tokens(final).map(value => h.actions.verify(value)?.command)).toContain(`/model use ${modelChoiceKey(A)}`);
+    // A one-time button cannot switch again.
     await h.bridge.accept(callback(token));
     await vi.runAllTimersAsync();
     expect(save).toHaveBeenCalledTimes(1);
-    expect(feedback.createFeedback).toHaveBeenCalledTimes(1);
-    expect(feedback.updateFeedback).toHaveBeenCalledTimes(1);
-    expect(text(feedback.updateFeedback.mock.calls[0]![1])).toContain('模型 Beta');
+    expect(feedback.updateFeedback).toHaveBeenCalledTimes(2);
     expect(h.delivered).toHaveLength(originalDeliveries);
   });
 
-  it('does not create feedback before identity and stale-card checks succeed', async () => {
+  it('opens another panel on the same card and shows a refused switch there in red', async () => {
+    const h = await setup();
+    await h.bridge.accept(event('/model'));
+    const thinking = h.button('/thinking'), choice = h.button(`/model use ${modelChoiceKey(B)}`);
+    const feedback = feedbackTransport(h);
+    await h.bridge.accept(callback(thinking));
+    expect(feedback.updateFeedback).toHaveBeenCalledTimes(1);
+    expect(text(feedback.updateFeedback.mock.calls[0]![1])).toContain('思考深度');
+    h.runtime.resolveModelSelection.mockRejectedValueOnce(new DshRuntimeError('INVALID_MODEL_SELECTION'));
+    await h.bridge.accept(callback(choice));
+    const [target, refused] = feedback.updateFeedback.mock.calls.at(-1)!;
+    expect(target).toBe('om_model_card');
+    expect(refused.kind === 'card' && (refused.card.header as {template: string}).template).toBe('red');
+    expect(text(refused)).toContain('这个模型或思考深度当前不可用');
+    // Fresh buttons let the owner choose again from the same card.
+    expect(tokens(refused).length).toBeGreaterThan(0);
+    expect((await h.modelPreferences.get(h.context()))?.selection).toEqual(A);
+    expect(feedback.createFeedback).not.toHaveBeenCalled();
+  });
+
+  it('ignores forged clicks and redraws a stale card in place instead of running it', async () => {
     const h = await setup();
     await h.bridge.accept(event('/model'));
     const token = h.button(`/model use ${modelChoiceKey(B)}`);
     await h.bridge.accept(event(`/thinking use ${thinkingChoiceKey('low')}`));
-    const feedback = feedbackTransport(h);
+    const feedback = feedbackTransport(h), deliveries = h.delivered.length;
     vi.useFakeTimers();
     await h.bridge.accept(callback(token, {operator_id: 'ou_bob'}));
     await h.bridge.accept(menu('dsh.model', {operator_open_id: 'ou_unknown'}));
     await h.bridge.accept(callback(token));
     await vi.runAllTimersAsync();
     expect(feedback.createFeedback).not.toHaveBeenCalled();
-    expect(feedback.updateFeedback).not.toHaveBeenCalled();
-    expect(text(h.latest())).toContain('设置已变化');
+    // Only the genuine but stale click touches its card, which now shows the current options.
+    expect(feedback.updateFeedback).toHaveBeenCalledTimes(1);
+    const [target, refreshed] = feedback.updateFeedback.mock.calls[0]!;
+    expect(target).toBe('om_model_card');
+    expect(text(refreshed)).toContain('设置刚刚变化');
+    expect(text(refreshed)).toContain('轻快');
+    expect(tokens(refreshed).length).toBeGreaterThan(0);
+    expect((await h.modelPreferences.get(h.context()))?.selection).toEqual({...A, reasoningEffort: 'low'});
+    expect(h.delivered).toHaveLength(deliveries);
   });
 
   it.each(['text mode', 'missing create', 'missing update', 'group'] as const)('keeps ordinary delivery and skips command feedback for %s', async mode => {

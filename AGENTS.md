@@ -35,10 +35,11 @@
 | 结构化作品、表单、云端图示与报告 | `src/presentation.ts`、`src/artifacts.ts`、`src/artifact-publisher.ts`、`src/rich-scopes.ts` | `presentation`、`artifacts`、`artifact-publisher`、`presentation-flow`；兼容矩阵里的原生展示工具 |
 | Harness 原生作品卡与本地预览 | `src/native-presentation.ts`、`src/dsh-runtime.ts` | `native-presentation`、`dsh-runtime-model-native`；公开交付事件、原生 checkpoint、实际侧栏预览 |
 | Harness 模式私聊：实时卡片、确认与提问、文件交付 | `src/dsh-runtime.ts`、`src/live-reply.ts`、`src/interaction-cards.ts`、`src/bridge.ts` | `dsh-runtime`、`live-reply`、`channel-bridge`、`interaction-cards`；兼容矩阵里的 harness 用例 |
+| 卡片原地更新、与 App 同步设置 | `src/bridge.ts`、`src/replies.ts`、`src/model-controls.ts`、`src/permission-controls.ts`、`src/dsh-runtime.ts` | `model-controls-bridge`、`channel-bridge`、`dsh-runtime`；兼容矩阵 `dsh-runtime-modern` 的共享模型用例 |
 
 表中简写测试名对应 `tests/<名称>.test.ts` 或 `.test.tsx`；onboarding 行的省略路径均在 `src/onboarding/`。修改接入、打包或运行脚本时，同步中英文 README / DEVELOPMENT.md 中的可复制步骤；修改用户可见行为时，同步中英文 README、DEVELOPMENT.md、基础帮助和模型表达。
 
-宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` 的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
+宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` / `rc.3` 的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
 
 ## 接入与宿主契约
 
@@ -47,12 +48,12 @@
 - 绑定来自未过期配对词对应的真实私聊事件，并匹配创建者或经过本机所有者确认。原生模型检查、连接就绪和飞书确认回复成功后才持久化启用；取消、响应未知、关闭失败时保留可恢复状态。
 - 自动接入仅授权本人私聊，`groupChats: []`，本人私聊为 Harness 模式（`directMode: 'harness'`）；团队配置默认仍是受限助手，群聊始终受限并使用 `allowedTools`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
 - Harness 模式只用于已验证本人的私聊（运行时对非私聊策略拒绝创建），飞书只是该 Harness 会话的入口：保留宿主人设、运行时上下文、工具、展示模式与权限策略，只追加 `lark-channel` 渠道段。宿主审批和提问由插件按 agent 作用域监听，转成签名卡片发给本人；卡片答复绕过会话队列（运行中的回合正占着它），按 ID 一次有效并校验操作者与聊天，超时、取消或卡片不可用一律拒绝。旧宿主的提问只有全局浏览器提供方，Harness 模式下隐藏 `ask_user_question`，由模型在回复里提问。会话按宿主的 agent 预设组成（新会话记录默认预设，恢复时用记录的或默认的），受限会话不加入预设。
-- 权限模式只在本人 Harness 私聊切换：经签名一次性卡片或本人命令，选项取自宿主公开的 `permissionPresets.catalog()`，经 `set()` 作用于当前会话；选择按私聊保存并在新开或恢复的会话上补齐，不修改宿主默认或其他会话。没有目录的旧宿主不提供该入口。
+- 权限模式只在本人 Harness 私聊切换：经签名一次性卡片或本人命令，选项取自宿主公开的 `permissionPresets.catalog()`，经 `set()` 作用于当前会话；选择按私聊保存并在新开或恢复的会话上补齐，不修改宿主默认或其他会话。App 在当前会话上改的模式（与上次所见不同）记为私聊选择，卸载会话（`/new`、`/resume`、闲置回收、恢复）和关闭服务前也要先记下；私聊没有选择时，新会话用 `catalog().defaultPreset`（新建会话带 `seed: []`，宿主不会自动补默认），恢复的会话保留其记录。没有目录的旧宿主不提供该入口。
 - 双宿主通过公开能力适配。保留 legacy persona/readFrom 与 modern prefix/snapshotEvents/open-read 的分支；现代 required cwd 取自当前 Agent。更新 peer 范围前，在对应真实宿主依赖上验证，不能只改版本字符串或跳过安全能力。
 - 自动接入状态按宿主代际及 home 分目录；原生持久化跟随宿主。跨代迁移需明确验证，不复用旧后台状态或混写原生日志。
 - 项目、仓库与 npm 包名为 `dsh-lark-agent`；插件 ID 与日志前缀 `im-larkbot`、数据目录 `~/.dsh-larkbot/`、RPC 路径 `larkbot`、设置页与样式 ID、应用注册来源、launchd 标签和构建环境变量沿用旧名。改这些运行标识会让已有安装丢失配置、状态或后台服务，或破坏设置页与宿主的契约，须先设计并验证迁移。
-- 模型目录与思考档位来自宿主公开接口。选择按用户／聊天／话题保存，首次捕获完整默认值；切换时保留原生会话，不修改宿主全局默认。按钮绑定设置 revision，执行前重新校验可用选项；保存结果不确定时停止推理。
-- 目录展示可以短时缓存和合并并发读取；实际切换仍实时校验。加载卡只更新已确认创建的消息，创建或更新结果未知时不另发 fallback、不重跑命令。群回复继续经过记忆授权检查。
+- 模型目录与思考档位来自宿主公开接口。App 宿主（有 `sessionProjections` 的 `modelSelection` 记录和 `agentDefaultModel.saveSelection`）上的本人 Harness 私聊与 App 共用：会话按 App 规则取模型（会话记录的选择 → 上次请求的模型 → 宿主默认），飞书切换追加 `model/selection` 并 checkpoint 后，再像 App 选择器一样保存为宿主默认（checkpoint 失败即关闭会话，下一轮前重新打开；没有会话时选择只存在宿主默认里，保存失败须报错）；按钮 revision 要在同步共享会话的记录之后、以及重新打开会话之后校验，过期卡片只刷新不执行；新会话不带私聊副本，私聊里只保留镜像供按钮绑定 revision。旧宿主、受限模式和管理员固定路由仍按用户／聊天／话题保存，首次捕获完整默认值，不修改宿主全局默认。切换时保留原生会话。按钮绑定设置 revision，执行前重新校验可用选项；保存结果不确定时停止推理。
+- 目录展示可以短时缓存和合并并发读取；实际切换仍实时校验。加载卡只更新已确认创建的消息，创建或更新结果未知时不另发 fallback、不重跑命令。本人私聊里点设置或话题卡片时只更新被点的卡片（处理中、结果、过期刷新），不另发卡片；群聊卡片仍另发回复，继续经过记忆授权检查。
 - 菜单事件没有消息 ID 或聊天 ID。仅接受固定 event key，以结构化 operator 身份查找已验证的私聊，再向该 open ID 发送；不能伪造 reply message ID。配对私聊映射在服务取得两把锁后写入。菜单订阅与菜单定义分别配置，发布后预检成功才启用接收。
 
 ## 必须保持的边界
@@ -63,7 +64,7 @@
 - 先持久化消息 claim 再执行；原生 checkpoint 成功后才发布会话目录或确认回复。保存结果不确定时拒绝继续访问，不能用空状态掩盖失败。
 - 每个用户／聊天／话题串行，取消只影响所属队列。修改型卡片 nonce 在容量准入后消费；回调继续校验签名、操作者、聊天和当前权限。
 - 受限模式（群聊、团队配置的默认私聊）保留独立 complete persona、动态上下文抑制、native tools、`restrict` 与单向 `guard`，以及宿主审批拒绝；不能把 Harness 模式、思考过程、实时卡片或确认卡片扩展到群聊。工作目录不是文件系统沙箱；额外工具必须自身实施资源权限。
-- CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。实时卡片只有首次回复算发送：卡片实体创建失败才改用普通回复（之后 10 分钟不再尝试）；回复结果未知时继续更新卡片、不另发消息。对同一卡片实体的更新幂等，可用更高的 sequence 重试。一次回复只用一张卡片：思考过程与工具步骤默认折叠，终稿优先放回答，思考过程只用剩余空间，超出卡片上限时截断并注明，不另发消息。
+- CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。实时卡片只有首次回复算发送：卡片实体创建失败才改用普通回复（之后 10 分钟不再尝试）；回复结果未知时继续更新卡片、不另发消息。对同一卡片实体的更新幂等，可用更高的 sequence 重试。一次回复只用一张卡片：思考过程与工具步骤默认折叠、按 App 的步骤名逐行显示，终稿优先放回答，过程用全部剩余空间，超出卡片上限时从最早的步骤省略并注明，不另发消息；工具详情和面板标题只用纯文本或转义后的内容。
 - Harness 交付的文件只在 realpath 位于该用户工作区内、是非空普通文件且不超过 30 MB 时上传，CLI 只收到以文件所在目录为 cwd 的 `./basename`；其余只告知电脑上的位置，上传结果未知时不重发。
 - 状态锁保护目录，全局机器人租约按 bot 身份跨 home / profile 保护接收实例；配对监听也取得同一租约。关闭时排空处理、原生持久化及进度清理，成功后才释放锁。关闭失败保留服务所有权和租约；持锁进程仍在或无法确认已退出时，禁止接管或删锁。只有确认原持锁进程已退出（PID 不存在、PID 已属于另一进程，或无法核对身份的锁早于本次开机），且机器人租约经专用 profile 的 CLI 确认没有活跃 consumer 时，才原子接管遗留锁；不按锁的年龄猜测，锁目录须在本机磁盘。
 - 原生会话释放与该会话队列串行；释放失败保留 handle 和 lane，确认关闭前不能打开同一原生日志。闲置回收也遵守此规则。
