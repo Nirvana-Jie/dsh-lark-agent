@@ -1,7 +1,7 @@
 import type {Context} from '@deepseek-ai/cordis';
 import {createHash} from 'node:crypto';
 import {access} from 'node:fs/promises';
-import {constants} from 'node:fs';
+import {constants, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {delimiter, join, resolve} from 'node:path';
 import {createBotService, BotServiceStartError, type BotService} from '../bot-service.js';
@@ -10,7 +10,8 @@ import {acquireLock, LockHeldError} from '../lock.js';
 import {ConnectionController, SetupError} from './controller.js';
 import {ConnectionStore} from './store.js';
 import {LarkPlatform} from './lark-platform.js';
-import type {ConnectionEndpoint, ConnectionResult} from './protocol.js';
+import type {ConnectionEndpoint, ConnectionResult, ConnectionSnapshot} from './protocol.js';
+import {npmLatest, UpdateCheck} from './updates.js';
 
 interface Peer {principal?: {kind?: string}}
 interface RpcHost {
@@ -133,6 +134,20 @@ export async function findLarkExecutable(explicit?: string): Promise<string> {
   return 'lark-cli';
 }
 
+/** This plugin's own package name and version, from the package it was installed from. */
+function installedPackage(): {name: string; version: string} | undefined {
+  try {
+    const value = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {name?: unknown; version?: unknown};
+    return typeof value.name === 'string' && typeof value.version === 'string' ? {name: value.name, version: value.version} : undefined;
+  } catch { return; }
+}
+
+/** Every snapshot the page receives carries the upgrade notice once a newer release is known. */
+function withUpdate(snapshot: ConnectionSnapshot, updates: UpdateCheck): ConnectionSnapshot {
+  const update = updates.status();
+  return update ? {...snapshot, update} : snapshot;
+}
+
 function requireRuntime(ctx: Context): void {
   if (!checkRuntimeCompatibility(ctx).supported) throw new SetupError('当前 dsh 缺少所需的会话能力，请检查插件和持久化服务。', false);
   const selection = (ctx.get('agentDefaultModel') as {currentSelection?(): {provider?: string; model?: string}} | undefined)?.currentSelection?.();
@@ -153,8 +168,12 @@ async function waitReady(service: BotService, signal: AbortSignal): Promise<void
   });
 }
 
-/** Attach the control plane without requiring any user-written team configuration. */
-export async function applyOnboarding(ctx: Context, options: {dataDir?: string; executable?: string} = {}): Promise<void> {
+/**
+ * Attach the control plane without requiring any user-written team configuration.
+ * `latestVersion` replaces the npm lookup behind the upgrade notice (tests use it to stay offline).
+ */
+export async function applyOnboarding(ctx: Context, options: {dataDir?: string; executable?: string;
+  latestVersion?: (signal: AbortSignal) => Promise<string | undefined>} = {}): Promise<void> {
   const connection = ctx.get('connection') as {rpc: RpcHost; fetch?: OwnerFetchRoutes} | undefined;
   if (!connection?.rpc) throw new SetupError('请在 dsh Web 或桌面 App 中启用插件；后台部署可设置 DSH_LARK_CONFIG。');
   const family = checkRuntimeCompatibility(ctx).family;
@@ -191,9 +210,17 @@ export async function applyOnboarding(ctx: Context, options: {dataDir?: string; 
       catch (error) {if (!await service.stop()) throw new BotServiceStartError(service); throw error;}
     },
   });
+  const installed = installedPackage();
+  const updates = new UpdateCheck(installed?.version, options.latestVersion
+    ?? (signal => installed ? npmLatest(installed.name, signal) : Promise.resolve(undefined)));
+  const control: ConnectionControl = {
+    snapshot: () => withUpdate(controller.snapshot(), updates),
+    profiles: signal => controller.profiles(signal),
+    command: async (endpoint, payload) => withUpdate(await controller.command(endpoint, payload), updates),
+  };
   let remove: (() => Promise<void>) | undefined;
   try {
-    remove = await registerConnectionRpc(connection.rpc, controller, connection.fetch);
+    remove = await registerConnectionRpc(connection.rpc, control, connection.fetch);
     ctx.effect(() => {
       return async () => {
         await remove!();

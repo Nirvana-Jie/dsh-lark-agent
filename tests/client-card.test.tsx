@@ -1,5 +1,5 @@
 import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
-import {describe, expect, it, vi} from 'vitest';
+import {describe, expect, it, onTestFinished, vi} from 'vitest';
 import type {ConnectionSnapshot} from '../src/onboarding/protocol.js';
 import {ConnectionApi, type ConnectionRpc} from '../src/client/api.js';
 import {ConnectionCard} from '../src/client/ConnectionCard.js';
@@ -108,6 +108,75 @@ describe('Feishu connection settings', () => {
     expect(call).toHaveBeenCalledTimes(1);
   });
 
+  it('marks every step done once connected or paused', async () => {
+    for (const phase of ['connected', 'paused'] as const) {
+      const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot(phase, {bot})));
+      const {unmount} = render(<ConnectionCard api={new ConnectionApi({call})} />);
+      const steps = await screen.findByRole('list', {name: '连接进度'});
+      expect(steps.querySelectorAll('li.done')).toHaveLength(3);
+      expect(steps.querySelector('[aria-current]')).toBeNull();
+      unmount();
+    }
+  });
+  it('offers a newer release with the App reinstall steps and opens its plugin list', async () => {
+    const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot('connected', {bot, update: {current: '0.2.0', latest: '0.3.0'}})));
+    const openPlugins = vi.fn(() => true);
+    render(<ConnectionCard api={new ConnectionApi({call})} host={{app: true, openPlugins}} />);
+    expect(await screen.findByText('飞书插件有新版本 0.3.0')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name: '升级'}));
+    expect(screen.getByText('先点下方「暂停连接」。')).toBeTruthy();
+    expect(screen.getByText(/在「插件列表」卸载 dsh-lark-agent/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name: '打开插件列表'}));
+    expect(openPlugins).toHaveBeenCalledOnce();
+    // Without the App's navigation the notice points at the tab instead.
+    openPlugins.mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', {name: '打开插件列表'}));
+    expect(screen.getByText('请切到上方的「插件列表」继续。')).toBeTruthy();
+    expect(call.mock.calls.every(call => call[1] === 'status')).toBe(true);
+  });
+  it('gives the Web host its update command to copy', async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, 'clipboard', {value: {writeText}, configurable: true});
+    try {
+      const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot('paused', {bot, update: {current: '0.2.0', latest: '0.3.0'}})));
+      render(<ConnectionCard api={new ConnectionApi({call})} host={{app: false}} />);
+      fireEvent.click(await screen.findByRole('button', {name: '升级'}));
+      expect(screen.getByText('连接已暂停，可以直接升级。')).toBeTruthy();
+      expect(screen.getByText('dsh plugin --profile web update dsh-lark-agent@latest')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', {name: '复制升级命令'}));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('dsh plugin --profile web update dsh-lark-agent@latest'));
+      expect(await screen.findByText('已复制升级命令')).toBeTruthy();
+    } finally { Reflect.deleteProperty(navigator, 'clipboard'); }
+  });
+  it('shows no notice when the installed version is current', async () => {
+    const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot('connected', {bot})));
+    render(<ConnectionCard api={new ConnectionApi({call})} host={{app: true}} />);
+    await screen.findByRole('heading', {name: '可以在飞书找我了'});
+    expect(screen.queryByText(/飞书插件有新版本/)).toBeNull();
+  });
+  it('lets the App tab open the plugin list only through the host service', () => {
+    const register = vi.fn<ClientContext['slots']['register']>(() => () => undefined);
+    const openList = vi.fn();
+    let navigation: unknown = {openList};
+    const cleanups: Array<() => void> = [];
+    const ctx: ClientContext = {
+      effect(factory) { const off = factory(); if (off) cleanups.push(off); },
+      connection: {rpc: {call: vi.fn()}, generation: {getSnapshot: () => 1}},
+      slots: {inject: (_name, factory) => { cleanups.push(factory()); }, register},
+      get: name => name === 'pluginNavigation' ? navigation : undefined,
+    };
+    apply(ctx);
+    onTestFinished(() => { for (const off of cleanups.reverse()) off(); });
+    const props = register.mock.calls[0]![0].inject();
+    expect(props.host?.app).toBe(true);
+    expect(props.host?.openPlugins?.()).toBe(true);
+    expect(openList).toHaveBeenCalledOnce();
+    // Older hosts lack the service; a failing one is treated the same way.
+    navigation = undefined;
+    expect(props.host?.openPlugins?.()).toBe(false);
+    navigation = {openList: () => { throw new Error('closed'); }};
+    expect(props.host?.openPlugins?.()).toBe(false);
+  });
   it('registers a disposable settings tab through the public host slot', () => {
     const dispose = vi.fn();
     const register = vi.fn<ClientContext['slots']['register']>(() => dispose);

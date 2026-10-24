@@ -6,7 +6,11 @@ import pluginIcon from '../../assets/plugin-icon.png';
 import feishuLogo from '../../assets/feishu-logo.png';
 import harnessIcon from '../../assets/deepseek-harness-icon.png';
 
-export interface ConnectionCardProps {api: ConnectionApi}
+/** `app` is the desktop App; `openPlugins` switches to its plugin list and reports whether it could. */
+export interface ConnectionCardProps {api: ConnectionApi; host?: {app: boolean; openPlugins?: () => boolean}}
+
+const UPGRADE_COMMAND = 'dsh plugin --profile web update dsh-lark-agent@latest';
+const UPGRADE_GUIDE = 'https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级';
 
 const phaseLabels: Record<ConnectionPhase, string> = {
   idle: '未连接', creating: '正在创建', waiting_scan: '等待扫码', configuring: '正在检查',
@@ -43,8 +47,41 @@ function Steps({active}: {active: number}) {
     </li>)}</ol>;
 }
 
+/**
+ * A newer release is published. A third-party plugin is upgraded by reinstalling
+ * it (the App offers in-place updates only to its own plugins), so this explains
+ * the steps and opens the plugin list or copies the Web command.
+ */
+function UpdateNotice({update, host, phase}: {update: {current: string; latest: string}; host?: ConnectionCardProps['host']; phase: ConnectionPhase}) {
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState('');
+  const app = host?.app ?? false;
+  const settled = phase === 'connected' || phase === 'paused';
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(UPGRADE_COMMAND); setStatus('已复制升级命令'); }
+    catch { setStatus('请选中上方命令手动复制'); }
+  };
+  return <div className="lark-update">
+    <div className="lark-update-row"><div><strong>飞书插件有新版本 {update.latest}</strong><p>当前 {update.current}，升级后保留现有连接和对话。</p></div>
+      <button className="lark-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '收起' : '升级'}</button></div>
+    {open && <>
+      <ol className="lark-instructions">
+        <li>{phase === 'paused' ? '连接已暂停，可以直接升级。' : settled ? '先点下方「暂停连接」。' : '先完成或取消当前的连接步骤。'}</li>
+        {app ? <li>在「插件列表」卸载 dsh-lark-agent，再点「添加插件」输入 dsh-lark-agent 安装新版。</li>
+          : <li>在终端运行下面的命令，然后重启 dsh web：<code className="lark-command">{UPGRADE_COMMAND}</code></li>}
+        <li>{settled ? '回到这里点「恢复连接」，在飞书发一句话确认能回复。' : '升级后回到这里继续。'}</li>
+      </ol>
+      <div className="lark-actions">{app
+        ? <button className="lark-secondary" onClick={() => { if (!host?.openPlugins?.()) setStatus('请切到上方的「插件列表」继续。'); }}>打开插件列表</button>
+        : <button className="lark-secondary" onClick={() => void copy()}>复制升级命令</button>}
+        <External className="lark-text-button" url={UPGRADE_GUIDE}>升级前的备份说明</External></div>
+      <p className="lark-copy-status" role="status">{status}</p>
+    </>}
+  </div>;
+}
+
 /** The host is authoritative for every transition, including readiness and identity. */
-export function ConnectionCard({api}: ConnectionCardProps) {
+export function ConnectionCard({api, host}: ConnectionCardProps) {
   const {snapshot, error, pending, profiles, refresh, mutate, loadProfiles} = useConnection(api);
   const [chooseExisting, setChooseExisting] = useState(false);
   const [selected, setSelected] = useState('');
@@ -132,7 +169,7 @@ export function ConnectionCard({api}: ConnectionCardProps) {
       <div className="lark-actions"><button className="lark-quiet" disabled={disabled} onClick={cancel}>取消连接</button></div>
     </>;
     if (phase === 'connected' || phase === 'paused') return <>
-      <Steps active={2} /><BrandLink connected={phase === 'connected'} /><h3 className="lark-intro-title">{phase === 'paused' ? '已暂停飞书连接' : '可以在飞书找我了'}</h3>
+      <Steps active={3} /><BrandLink connected={phase === 'connected'} /><h3 className="lark-intro-title">{phase === 'paused' ? '已暂停飞书连接' : '可以在飞书找我了'}</h3>
       <p className="lark-copy lark-centered">{phase === 'paused' ? <>暂停期间，我不会在飞书回复。<br />准备好了，随时恢复。</> : <>打开机器人的私聊，直接发消息。<br />我们可以接着聊。</>}</p>
       <div className="lark-actions lark-center">{phase === 'paused' ? <button className="lark-primary" disabled={unavailable} onClick={() => void mutate('resume')}>恢复连接</button> : <>
         {snapshot.bot && <External className="lark-primary" url={snapshot.bot.url}>去飞书聊天</External>}<button className="lark-secondary" disabled={unavailable} onClick={() => void mutate('pause')}>暂停连接</button></>}</div>
@@ -162,6 +199,7 @@ export function ConnectionCard({api}: ConnectionCardProps) {
         <span className={`lark-status ${phase === 'connected' ? 'online' : ''}`} role="status"><i aria-hidden="true" />{snapshot ? phaseLabels[phase] : '读取中'}</span></div>
       <div className="lark-body" aria-busy={disabled}>
         {error && <div className="lark-error" role="alert"><span>{error}</span><button className="lark-text-button" disabled={disabled} onClick={refresh}>重试</button></div>}
+        {snapshot?.update && <UpdateNotice update={snapshot.update} host={host} phase={phase} />}
         {body()}
         {pending && <div className="lark-pending" role="status"><span className="lark-spinner" aria-hidden="true" />正在处理，请稍等…</div>}
       </div>

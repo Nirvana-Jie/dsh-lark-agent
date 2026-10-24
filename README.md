@@ -53,6 +53,8 @@ Then restart `dsh web`.
 
 ### Update
 
+When a new version is out, the Feishu settings page shows a notice with these steps (in the desktop app it also opens the plugin list for you).
+
 1. On the Feishu settings page, click **暂停连接** (pause) and back up as described in [Upgrade](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级).
 2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (this in-app upgrade hasn't been tested end to end yet; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.
 3. Click **恢复连接** (resume) and check that the bot replies.

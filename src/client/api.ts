@@ -83,6 +83,15 @@ export function parseSnapshot(value: unknown): ConnectionSnapshot {
       snapshot.documentSetup.qr = {url: officialUrl(qr.url), image, expiresAt: timestamp(qr.expiresAt)};
     }
   }
+  if (data.update !== undefined) {
+    const update = object(data.update);
+    const version = (value: unknown) => {
+      const raw = text(value, 64);
+      if (!/^\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z.-]{1,40})?$/.test(raw)) throw new Error('invalid version');
+      return raw;
+    };
+    snapshot.update = {current: version(update.current), latest: version(update.latest)};
+  }
   return snapshot;
 }
 

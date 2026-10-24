@@ -23,7 +23,7 @@
 | 插件入口、消息服务、重连与关闭 | `src/index.ts`、`src/bot-service.ts`、`src/config.ts` | `index`、`config` 测试 |
 | 扫码、应用配置、配对与启停 | `src/onboarding/controller.ts`、`lark-platform.ts`、`pairing.ts`、`store.ts` | `onboarding`、`lark-platform` 测试 |
 | 宿主 RPC、所有者权限、接入状态目录 | `src/onboarding/host.ts`、`protocol.ts` | `onboarding-rpc`、`client-modern-host`、`index` 测试 |
-| 设置页、异步反馈、客户端打包 | `src/client/`、`scripts/build-client.mjs` | `client-api`、`client-card` 测试；检查 `./client` 入口及真实宿主加载 |
+| 设置页、异步反馈、客户端打包、升级提示 | `src/client/`、`src/onboarding/updates.ts`、`scripts/build-client.mjs` | `client-api`、`client-card`、`update-check` 测试；检查 `./client` 入口及真实宿主加载 |
 | 身份、准入、队列、命令 | `src/message.ts`、`src/bridge.ts` | `message`、`bridge`、`rich-bridge` 测试 |
 | 双宿主模型、工具与原生恢复 | `src/dsh-runtime.ts` | `dsh-runtime`、`dsh-runtime-modern`、`persistence-flow` 测试 |
 | 模型选择、思考深度与旧卡片冲突 | `src/model-controls.ts`、`src/model-preferences.ts`、`src/bridge.ts` | `model-controls-bridge`、`model-preferences`、`dsh-runtime-model-native` 测试 |
@@ -45,6 +45,7 @@
 
 - `configFile` / `DSH_LARK_CONFIG` 有值时加载显式团队配置；留空时注册连接设置。两条入口复用 `createBotService`，保持相同准入、持久化和关闭规则。
 - 控制面只允许宿主所有者访问：旧 RPC 保留 loopback 授权，新 RPC 校验 owner principal。UI 只传协议列出的操作字段，不接受任意配置路径、身份或密钥。
+- 设置页的升级提示只读 npm `latest` 标签（只发包名；设置页轮询时最多 6 小时一次，后台进行，不阻塞状态读取，失败不提示），经快照的 `update` 字段送到页面。插件不自行下载、替换或重装自己：App 内只经公开的 `pluginNavigation.openList()` 打开插件列表，旧 App 与 Web 只给步骤和命令。测试经 `latestVersion` 注入，不访问网络。
 - 绑定来自未过期配对词对应的真实私聊事件，并匹配创建者或经过本机所有者确认。原生模型检查、连接就绪和飞书确认回复成功后才持久化启用；取消、响应未知、关闭失败时保留可恢复状态。
 - 自动接入仅授权本人私聊，`groupChats: []`，本人私聊为 Harness 模式（`directMode: 'harness'`）；团队配置默认仍是受限助手，群聊始终受限并使用 `allowedTools`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
 - Harness 模式只用于已验证本人的私聊（运行时对非私聊策略拒绝创建），飞书只是该 Harness 会话的入口：保留宿主人设、运行时上下文、工具、展示模式与权限策略，只追加 `lark-channel` 渠道段。宿主审批和提问由插件按 agent 作用域监听，转成签名卡片发给本人；卡片答复绕过会话队列（运行中的回合正占着它），按 ID 一次有效并校验操作者与聊天，超时、取消或卡片不可用一律拒绝。旧宿主的提问只有全局浏览器提供方，Harness 模式下隐藏 `ask_user_question`，由模型在回复里提问。会话按宿主的 agent 预设组成（新会话记录默认预设，恢复时用记录的或默认的），受限会话不加入预设。
