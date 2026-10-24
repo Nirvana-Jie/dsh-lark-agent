@@ -434,9 +434,11 @@ export class BotBridge {
     if (this.stopped || lane.generation !== generation) return;
     const controller = new AbortController();
     lane.controller = controller;
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.config.turnTimeoutMs);
     const harness = message.chatType === 'p2p' && lane.user.directMode === 'harness';
+    let timedOut = false;
+    // Like the App, a turn runs until it ends or someone sends /stop. Only a configured cap bounds a restricted turn.
+    const deadline = harness ? undefined : this.config.turnTimeoutMs;
+    const timer = deadline === undefined ? undefined : setTimeout(() => { timedOut = true; controller.abort(); }, deadline);
     let live: LiveReply | undefined;
     // Once a live card exists it carries this turn's whole outcome; nothing else is sent as text.
     const conclude = async (final: LiveReplyFinal): Promise<void> => {

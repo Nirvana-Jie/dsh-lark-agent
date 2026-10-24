@@ -21,7 +21,6 @@
       "allowedTools": []
     }
   ],
-  "turnTimeoutMs": 120000,
   "idleTimeoutMs": 1800000,
   "maxSessions": 100,
   "maxSessionsPerUser": 10,

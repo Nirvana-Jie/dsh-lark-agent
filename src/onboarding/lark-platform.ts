@@ -30,6 +30,8 @@ export interface Inspection {
   appStatus?: number; onlineVersionId?: string; pendingVersionId?: string;
   publicationStatus: 'approved' | 'pending' | 'rejected' | 'draft' | 'unknown';
   subscribedEvents?: string[];
+  /** Event keys of the shown bot menu in that version; empty when its menu is off. */
+  menuEventKeys?: string[];
   /** Read-only CLI preflight evidence. Actual connection readiness is checked by the service. */
   cardReady?: boolean;
   menuReady?: boolean;
@@ -380,6 +382,11 @@ export class LarkPlatform {
       // Version events do not prove websocket delivery. The controller still needs a real paired message.
       if (Array.isArray(detail.events) && detail.events.every(v => typeof v === 'string' && /^[a-zA-Z0-9_.:-]{1,200}$/.test(v))) {
         inspection.subscribedEvents = detail.events as string[];
+      }
+      const bot = object(object(detail.ability)?.bot);
+      if (bot && Array.isArray(bot.bot_menus) && bot.bot_menus.length <= 64) {
+        inspection.menuEventKeys = bot.bot_menu_enable !== true ? [] : bot.bot_menus.map(node => object(node)?.event_key)
+          .filter((key): key is string => typeof key === 'string' && /^[a-zA-Z0-9_.:-]{1,64}$/.test(key));
       }
     });
     checkSignal(signal);

@@ -15,7 +15,7 @@ const ok = (data: unknown) => JSON.stringify({ok: true, identity: 'bot', data});
 
 function platformFixture(options: {
   missingScope?: string; applicationError?: boolean; pending?: boolean; firstPublication?: boolean; rawApi?: boolean; botError?: boolean;
-  cardDecision?: unknown; cardError?: boolean; menuDecision?: unknown; menuError?: boolean;
+  cardDecision?: unknown; cardError?: boolean; menuDecision?: unknown; menuError?: boolean; ability?: unknown;
 } = {}) {
   const run = vi.fn<PlatformRunner>(async args => {
     if (args[0] === 'profile') return JSON.stringify([profile]);
@@ -49,7 +49,7 @@ function platformFixture(options: {
     if (path?.includes('/app_versions/')) {
       const version = path.slice(path.lastIndexOf('/') + 1);
       return ok({app_version: {app_id: 'cli_test', version_id: version, status: version === 'oav_pending' ? 3 : 1,
-        events: ['im.message.receive_v1']}});
+        events: ['im.message.receive_v1'], ...(options.ability === undefined ? {} : {ability: options.ability})}});
     }
     if (args[3] === 'PATCH') return ok({});
     if (args[3] === 'POST') return ok({version_id: '1000000000000000001'});
@@ -412,6 +412,20 @@ describe('Lark onboarding platform inspection and publication', () => {
     expect(await platform.inspect(profile.name)).toMatchObject({onlineVersionId: 'oav_online', pendingVersionId: 'oav_pending', publicationStatus: 'approved'});
     expect(run.mock.calls.map(([args]) => args[4]).filter(path => path?.includes('/app_versions/')))
       .toEqual(['/open-apis/application/v6/applications/cli_test/app_versions/oav_online']);
+  });
+
+  it('reads which menu entries the judged version shows, and none when its menu is off', async () => {
+    const menus = [{menu_id: '1', default_name: '新话题', event_key: 'dsh.new', menu_content_type: 2},
+      {menu_id: '2', default_name: '设置', menu_content_type: 3},
+      {menu_id: '3', parent_menu_id: '2', default_name: '模型', event_key: 'dsh.model', menu_content_type: 2},
+      {menu_id: '4', default_name: '<b>', event_key: 'not a key', menu_content_type: 2}];
+    const shown = platformFixture({ability: {bot: {bot_menu_enable: true, bot_menus: menus}}});
+    expect((await shown.platform.inspect(profile.name)).menuEventKeys).toEqual(['dsh.new', 'dsh.model']);
+    const off = platformFixture({ability: {bot: {bot_menu_enable: false, bot_menus: menus}}});
+    expect((await off.platform.inspect(profile.name)).menuEventKeys).toEqual([]);
+    for (const ability of [{bot: {bot_menus: 'dsh.new'}}, {}, 'bot']) {
+      expect((await platformFixture({ability}).platform.inspect(profile.name)).menuEventKeys).toBeUndefined();
+    }
   });
 
   it('judges a first publication with nothing online by its pending version', async () => {

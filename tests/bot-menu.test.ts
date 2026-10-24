@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {BOT_MENU_EVENT, botMenuCommand, buildBotMenuAbility, buildBotMenuPlan} from '../src/bot-menu.js';
+import {BOT_MENU_EVENT, botMenuCommand, buildBotMenuAbility, buildBotMenuPlan, missingBotMenuEntries} from '../src/bot-menu.js';
 
 describe('native bot menu configuration', () => {
   it('keeps all actions within a compact two-level menu with resolvable parents', () => {
@@ -25,6 +25,16 @@ describe('native bot menu configuration', () => {
     expect(top.length).toBeLessThanOrEqual(5);
     expect(nodes.filter(node => node.parent_menu_id === 'dsh_settings').length).toBeLessThanOrEqual(5);
     expect(nodes.length).toBeLessThanOrEqual(10);
+  });
+
+  it('names the entries a menu configured before a release lacks, and stays quiet without one', () => {
+    expect(missingBotMenuEntries(['dsh.new', 'dsh.sessions', 'dsh.model', 'dsh.thinking']))
+      .toEqual([{label: '权限模式', eventKey: 'dsh.permission', parent: '设置'}]);
+    expect(missingBotMenuEntries(['dsh.model', 'dsh.thinking', 'dsh.permission']))
+      .toEqual([{label: '新话题', eventKey: 'dsh.new'}, {label: '历史对话', eventKey: 'dsh.sessions'}]);
+    expect(missingBotMenuEntries(['dsh.new', 'dsh.sessions', 'dsh.model', 'dsh.thinking', 'dsh.permission'])).toEqual([]);
+    expect(missingBotMenuEntries([])).toEqual([]);
+    expect(missingBotMenuEntries(['other.key'])).toEqual([]);
   });
 
   it('returns detached payloads so a preview edit cannot change later configuration', () => {

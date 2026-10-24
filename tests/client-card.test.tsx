@@ -118,6 +118,18 @@ describe('Feishu connection settings', () => {
       unmount();
     }
   });
+  it('tells the owner which menu entry to add in the developer console', async () => {
+    const menu = {missing: [{label: '权限模式', eventKey: 'dsh.permission', parent: '设置'}], url: 'https://open.feishu.cn/app/cli_demo'};
+    for (const [phase, last] of [['connected', '回到这里点「暂停连接」，再点「恢复连接」。'], ['paused', '回到这里点「恢复连接」。']] as const) {
+      const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot(phase, {bot, menu})));
+      const {unmount} = render(<ConnectionCard api={new ConnectionApi({call})} />);
+      expect(await screen.findByText('飞书底部菜单缺少入口')).toBeTruthy();
+      expect(screen.getByText('设置 → 权限模式（事件标识 dsh.permission）')).toBeTruthy();
+      expect(screen.getByText(last)).toBeTruthy();
+      expect(screen.getByRole('link', {name: /打开飞书后台/}).getAttribute('href')).toBe(menu.url);
+      unmount();
+    }
+  });
   it('offers a newer release with the App reinstall steps and opens its plugin list', async () => {
     const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot('connected', {bot, update: {current: '0.2.0', latest: '0.3.0'}})));
     const openPlugins = vi.fn(() => true);

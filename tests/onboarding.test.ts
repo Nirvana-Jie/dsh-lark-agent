@@ -199,6 +199,28 @@ describe('connection controller lifecycle', () => {
     expect(h.deps.pair).not.toHaveBeenCalled();
   });
 
+  it('reports menu entries the published app lacks, and clears them once the menu is complete', async () => {
+    const h = await fixture(baseRecord);
+    const older = ['dsh.new', 'dsh.sessions', 'dsh.model', 'dsh.thinking'];
+    h.platform.inspect.mockResolvedValueOnce(inspection({menuReady: true, menuEventKeys: older}))
+      .mockResolvedValue(inspection({menuReady: true, menuEventKeys: [...older, 'dsh.permission']}));
+    await h.controller.initialize(); await phase(h.controller, 'connected');
+    expect(h.controller.snapshot().menu).toEqual({missing: [{label: '权限模式', eventKey: 'dsh.permission', parent: '设置'}],
+      url: 'https://open.feishu.cn/app/cli_fixture'});
+    await h.controller.command('pause', {}); await h.controller.command('resume', {});
+    await phase(h.controller, 'connected');
+    expect(h.controller.snapshot().menu).toBeUndefined();
+  });
+
+  it('reports a stale menu while paused without resuming the connection', async () => {
+    const h = await fixture({...baseRecord, enabled: false});
+    h.platform.inspect.mockResolvedValue(inspection({menuEventKeys: ['dsh.new', 'dsh.model']}));
+    await h.controller.initialize();
+    await vi.waitFor(() => expect(h.controller.snapshot().menu?.missing.map(entry => entry.label)).toEqual(['历史对话', '思考深度', '权限模式']));
+    expect(h.controller.snapshot().phase).toBe('paused');
+    expect(h.deps.start).not.toHaveBeenCalled();
+  });
+
   it('passes only the verified pairing identity to locked service startup for the first menu', async () => {
     const h = await fixture();
     h.platform.inspect.mockResolvedValue(inspection({menuReady: true}));

@@ -15,6 +15,9 @@ export function botMenuCommand(eventKey: unknown): BotMenuCommand | undefined {
   return BOT_MENU_COMMANDS[eventKey as keyof typeof BOT_MENU_COMMANDS];
 }
 
+/** A menu entry as the owner adds it in the developer console. */
+export interface BotMenuEntry {label: string; eventKey: string; parent?: string}
+
 export interface BotMenuNode {
   menu_id: string;
   parent_menu_id?: string;
@@ -44,6 +47,20 @@ export function buildBotMenuAbility(): {bot: {
     {menu_id: 'dsh_thinking', parent_menu_id: 'dsh_settings', sort: 1, default_name: '思考深度', menu_content_type: 2, event_key: 'dsh.thinking'},
     {menu_id: 'dsh_permission', parent_menu_id: 'dsh_settings', sort: 2, default_name: '权限模式', menu_content_type: 2, event_key: 'dsh.permission'},
   ]}};
+}
+
+/**
+ * The entries a published menu lacks, by label. A menu configured by hand
+ * before a release added an entry stays without it; none is reported when
+ * no dsh entry was configured at all.
+ */
+export function missingBotMenuEntries(eventKeys: readonly string[]): BotMenuEntry[] {
+  const nodes = buildBotMenuAbility().bot.bot_menus, entries = nodes.filter(node => node.event_key);
+  if (!entries.some(node => eventKeys.includes(node.event_key!))) return [];
+  return entries.filter(node => !eventKeys.includes(node.event_key!)).map(node => {
+    const parent = nodes.find(candidate => candidate.menu_id === node.parent_menu_id)?.default_name;
+    return {label: node.default_name, eventKey: node.event_key!, ...(parent ? {parent} : {})};
+  });
 }
 
 /** Pure review/export plan: this module never invokes an API or changes an app. */

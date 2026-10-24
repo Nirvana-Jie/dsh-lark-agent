@@ -41,6 +41,9 @@ const TRUNCATED = '回复超过了飞书卡片的长度上限，后面的内容�
 const grey = (markdown: string) => `<font color='grey'>${markdown}</font>`;
 const bytes = (value: unknown) => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value), 'utf8');
 const code = (value: string) => '`' + value.replace(/`/g, 'ˋ') + '`';
+// A harness turn may run for an hour; past a minute, seconds stop being readable.
+const elapsed = (seconds: number) => seconds < 60 ? `${seconds} 秒`
+  : seconds < 3600 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`;
 
 /** The App's step labels and a matching Feishu icon, by tool name. */
 function activity(name: string): {label: string; doing: string; icon: string} {
@@ -370,7 +373,7 @@ export class LiveReply {
 
   private panelTitle(): string {
     const tools = this.tools ? ` · ${this.tools} 次工具调用` : '';
-    const seconds = (end?: number) => Math.max(1, Math.round(((end ?? this.now()) - this.startedAt) / 1000));
+    const seconds = (end?: number) => elapsed(Math.max(1, Math.round(((end ?? this.now()) - this.startedAt) / 1000)));
     switch (this.phase) {
       case 'thinking': {
         const running = [...this.steps].reverse().find(step => step.kind === 'tool' && step.state === 'running');
@@ -378,10 +381,10 @@ export class LiveReply {
         const detail = running.detail ? plainLabel(running.detail, 40) : '';
         return `${activity(running.name).doing}${detail ? ` · ${detail}` : '…'}`;
       }
-      case 'answering': return `已思考 ${seconds(this.answeredAt)} 秒${tools}`;
-      case 'done': return `已完成，用时 ${seconds(this.finishedAt)} 秒${tools}`;
-      case 'stopped': return `已停止，用时 ${seconds(this.finishedAt)} 秒${tools}`;
-      case 'failed': return `处理失败，用时 ${seconds(this.finishedAt)} 秒${tools}`;
+      case 'answering': return `已思考 ${seconds(this.answeredAt)}${tools}`;
+      case 'done': return `已完成，用时 ${seconds(this.finishedAt)}${tools}`;
+      case 'stopped': return `已停止，用时 ${seconds(this.finishedAt)}${tools}`;
+      case 'failed': return `处理失败，用时 ${seconds(this.finishedAt)}${tools}`;
     }
   }
 

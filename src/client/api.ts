@@ -83,6 +83,15 @@ export function parseSnapshot(value: unknown): ConnectionSnapshot {
       snapshot.documentSetup.qr = {url: officialUrl(qr.url), image, expiresAt: timestamp(qr.expiresAt)};
     }
   }
+  if (data.menu !== undefined) {
+    const menu = object(data.menu);
+    if (!Array.isArray(menu.missing) || !menu.missing.length || menu.missing.length > 10) throw new Error('invalid menu');
+    snapshot.menu = {url: officialUrl(menu.url), missing: menu.missing.map(value => {
+      const entry = object(value);
+      if (typeof entry.eventKey !== 'string' || !/^dsh\.[a-z]{1,30}$/.test(entry.eventKey)) throw new Error('invalid menu');
+      return {label: text(entry.label, 60), eventKey: entry.eventKey, ...(entry.parent === undefined ? {} : {parent: text(entry.parent, 60)})};
+    })};
+  }
   if (data.update !== undefined) {
     const update = object(data.update);
     const version = (value: unknown) => {

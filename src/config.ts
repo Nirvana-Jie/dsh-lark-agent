@@ -23,7 +23,8 @@ export interface BotConfig {
   provider?: string;
   model?: string;
   users: UserPolicy[];
-  turnTimeoutMs: number;
+  /** Optional cap on a restricted turn; unset, a turn runs until done or /stop. */
+  turnTimeoutMs?: number;
   idleTimeoutMs: number;
   maxSessions: number;
   maxSessionsPerUser: number;
@@ -95,8 +96,8 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
     provider: data.provider === undefined ? undefined : string(data.provider, 'provider'),
     model: data.model === undefined ? undefined : string(data.model, 'model'),
     users,
-    // A harness-mode chat does research and tool work, and may wait minutes for an approval.
-    turnTimeoutMs: integer(data.turnTimeoutMs, users.some(user => user.directMode === 'harness') ? 900_000 : 120_000, 1000, 1_800_000, 'turnTimeoutMs'),
+    // An agent's work can take an hour. Only an administrator's explicit cap bounds restricted turns.
+    ...(data.turnTimeoutMs === undefined ? {} : {turnTimeoutMs: integer(data.turnTimeoutMs, 0, 1000, 1_800_000, 'turnTimeoutMs')}),
     idleTimeoutMs: integer(data.idleTimeoutMs, 1_800_000, 1000, 86_400_000, 'idleTimeoutMs'),
     maxSessions: integer(data.maxSessions, 100, 1, 1000, 'maxSessions'),
     maxSessionsPerUser: integer(data.maxSessionsPerUser, 10, 1, 100, 'maxSessionsPerUser'),
