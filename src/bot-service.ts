@@ -15,6 +15,7 @@ import { DirectChatsStore } from './direct-chats.js';
 import { ModelPreferencesStore } from './model-preferences.js';
 import {ArtifactStore} from './artifacts.js';
 import {LarkArtifactPublisher} from './artifact-publisher.js';
+import {PermissionPreferencesStore} from './permission-preferences.js';
 
 export interface BotService {
   start(): void;
@@ -45,13 +46,14 @@ export async function createBotService(ctx: Context, config: BotConfig,
       SessionStore.open(config.stateDir), MemoryStore.open(config.stateDir),
       config.cardInteractions ? CardActions.open(config.stateDir, JSON.stringify([config.profile, config.botOpenId])) : undefined,
       DirectChatsStore.open(config.stateDir), ModelPreferencesStore.open(config.stateDir), ArtifactStore.open(config.stateDir),
+      PermissionPreferencesStore.open(config.stateDir),
     ] as const;
     // An opener may create signing state: finish all openers before releasing
     // ownership after a sibling fails, so no old writer outlives the lock.
     const openedStores = await Promise.allSettled(openingStores);
     const failed = openedStores.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
-    const [sessions, memories, actions, directChats, modelPreferences, artifacts] = await Promise.all(openingStores);
+    const [sessions, memories, actions, directChats, modelPreferences, artifacts, permissionPreferences] = await Promise.all(openingStores);
     if (startup?.directChat) {
       const {openId, chatId} = startup.directChat;
       if (!config.users.some(user => user.openId === openId && user.direct)) throw new Error('Paired chat owner is not authorized for direct messages');
@@ -66,7 +68,7 @@ export async function createBotService(ctx: Context, config: BotConfig,
       ? new LarkCli({profile: config.profile, executable: config.executable, eventKey: 'application.bot.menu_v6'}) : undefined;
     const progressTransport = config.loadingReaction
       ? new LarkCli({profile: config.profile, executable: config.executable, commandTimeoutMs: 5_000}) : undefined;
-    const bridge = new BotBridge(config, new DshRuntime(ctx), transport, ledger, {sessions, memories, actions, directChats, modelPreferences, artifacts},
+    const bridge = new BotBridge(config, new DshRuntime(ctx), transport, ledger, {sessions, memories, actions, directChats, modelPreferences, artifacts, permissionPreferences},
       event => console.info(`[im-larkbot] ${JSON.stringify(event)}`), progressTransport,
       new LarkArtifactPublisher(config.profile, config.botOpenId, {executable: config.executable}));
     let stopped = false, started = false, healthy = false;

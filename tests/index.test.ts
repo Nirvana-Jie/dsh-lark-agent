@@ -23,6 +23,7 @@ vi.mock('../src/card-actions.js', () => ({CardActions: {open: state.actionsOpen}
 vi.mock('../src/direct-chats.js', () => ({DirectChatsStore: {open: async () => ({})}}));
 vi.mock('../src/model-preferences.js', () => ({ModelPreferencesStore: {open: async () => ({})}}));
 vi.mock('../src/artifacts.js', () => ({ArtifactStore: {open: async () => ({})}}));
+vi.mock('../src/permission-preferences.js', () => ({PermissionPreferencesStore: {open: async () => ({})}}));
 vi.mock('../src/dsh-runtime.js', () => ({DshRuntime: class {}}));
 vi.mock('../src/lark-cli.js', () => ({
   LarkCli: class {

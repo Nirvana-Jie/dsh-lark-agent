@@ -740,3 +740,88 @@ describe('event consumer check before a bot lease takeover', () => {
     expect(slow.kill).toHaveBeenCalledWith('SIGTERM');
   });
 });
+
+describe('LarkCli live cards and files', () => {
+  let child: FakeChild;
+  beforeEach(() => {
+    child = new FakeChild();
+    vi.mocked(spawn).mockReset().mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+  });
+  const card = (text = 'hello') => ({schema: '2.0', body: {elements: [{tag: 'markdown', element_id: 'answer', content: text}]}});
+  const args = () => vi.mocked(spawn).mock.calls[0]?.[1];
+  const body = () => JSON.parse(child.stdin.read()?.toString());
+
+  it('creates a JSON 2.0 card entity on stdin and returns only a validated card ID', async () => {
+    const result = new LarkCli({profile: 'team-bot'}).createCardEntity(card());
+    expect(args()).toEqual(['--profile', 'team-bot', 'api', 'POST', '/open-apis/cardkit/v1/cards', '--data', '-', '--as', 'bot', '--format', 'json']);
+    expect(body()).toEqual({type: 'card_json', data: JSON.stringify(card())});
+    child.stdout.write('{"ok":true,"identity":"bot","data":{"card_id":"7355372766134157313"}}');
+    child.close();
+    await expect(result).resolves.toBe('7355372766134157313');
+  });
+
+  it('rejects an unconfirmed card entity and oversized or legacy cards before spawning', async () => {
+    const result = new LarkCli({profile: 'team-bot'}).createCardEntity(card());
+    child.stdout.write('{"ok":true,"identity":"bot","data":{"card_id":"../x"}}');
+    child.close();
+    await expect(result).rejects.toThrow('not confirmed');
+    vi.mocked(spawn).mockClear();
+    await expect(new LarkCli({profile: 'team-bot'}).createCardEntity({schema: '1.0'})).rejects.toThrow('Invalid Lark card entity');
+    await expect(new LarkCli({profile: 'team-bot'}).createCardEntity(card('x'.repeat(30_000)))).rejects.toThrow('size limit');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('replies with a card entity reference and an explicit thread choice %s', async inThread => {
+    const result = new LarkCli({profile: 'team-bot'}).replyCardEntity('om_prompt', '7355', {idempotencyKey: 'live-1', inThread});
+    expect(args()).toEqual(['--profile', 'team-bot', 'api', 'POST', '/open-apis/im/v1/messages/om_prompt/reply', '--data', '-', '--as', 'bot', '--format', 'json']);
+    expect(body()).toEqual({msg_type: 'interactive', content: JSON.stringify({type: 'card', data: {card_id: '7355'}}), uuid: 'live-1', reply_in_thread: inThread});
+    child.stdout.write('{"ok":true,"identity":"bot","data":{"message_id":"om_live"}}');
+    child.close();
+    await expect(result).resolves.toBeUndefined();
+  });
+
+  it('streams element text with a strictly increasing caller sequence and replaces whole cards with PUT', async () => {
+    const cli = new LarkCli({profile: 'team-bot'});
+    const streamed = cli.streamCardText('7355', 'answer', 'partial text', 3);
+    expect(args()).toEqual(['--profile', 'team-bot', 'api', 'PUT', '/open-apis/cardkit/v1/cards/7355/elements/answer/content',
+      '--data', '-', '--as', 'bot', '--format', 'json']);
+    expect(body()).toEqual({content: 'partial text', sequence: 3, uuid: expect.stringMatching(/^[0-9a-f-]{36}$/)});
+    child.stdout.write('{"ok":true,"identity":"bot","data":{}}');
+    child.close();
+    await streamed;
+    const second = new FakeChild();
+    vi.mocked(spawn).mockReset().mockReturnValue(second as unknown as ReturnType<typeof spawn>);
+    const updated = cli.updateCardEntity('7355', card('final'), 4);
+    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toEqual(['--profile', 'team-bot', 'api', 'PUT', '/open-apis/cardkit/v1/cards/7355',
+      '--data', '-', '--as', 'bot', '--format', 'json']);
+    expect(JSON.parse(second.stdin.read()?.toString())).toEqual({card: {type: 'card_json', data: JSON.stringify(card('final'))}, sequence: 4,
+      uuid: expect.stringMatching(/^[0-9a-f-]{36}$/)});
+    second.stdout.write('{"ok":true,"identity":"bot","data":{}}');
+    second.close();
+    await updated;
+  });
+
+  it.each([
+    ['../7355', 'answer', 'text', 1], ['7355', 'Answer', 'text', 1], ['7355', 'answer/x', 'text', 1],
+    ['7355', 'answer', '', 1], ['7355', 'answer', 'text', 0], ['7355', 'answer', 'text', 1.5],
+  ])('rejects malformed stream updates before spawning: %s %s', async (cardId, elementId, content, sequence) => {
+    await expect(new LarkCli({profile: 'team-bot'}).streamCardText(cardId, elementId, content, sequence)).rejects.toThrow('Invalid Lark card stream update');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('uploads one validated file by ./basename from its own directory (image %s)', async image => {
+    const result = new LarkCli({profile: 'team-bot'}).replyFile('om_prompt', '/work/space/file_v2.pdf', {idempotencyKey: 'file-1', inThread: true, image});
+    expect(args()).toEqual(['--profile', 'team-bot', 'im', '+messages-reply', '--message-id', 'om_prompt', `--${image ? 'image' : 'file'}=./file_v2.pdf`,
+      '--as', 'bot', '--format', 'json', '--idempotency-key', 'file-1', '--reply-in-thread']);
+    expect(vi.mocked(spawn).mock.calls[0]?.[2]).toMatchObject({cwd: '/work/space', shell: false});
+    child.stdout.write('{"ok":true,"identity":"bot","data":{"message_id":"om_file"}}');
+    child.close();
+    await expect(result).resolves.toBeUndefined();
+  });
+
+  it.each(['relative/file.pdf', '/work/space/', '/work/space/bad\nname', '/work/space/..'])('rejects unsafe file paths before spawning: %j', async path => {
+    await expect(new LarkCli({profile: 'team-bot'}).replyFile('om_prompt', path, {idempotencyKey: 'file-1', inThread: false, image: false}))
+      .rejects.toThrow('Invalid Lark file reply');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+});

@@ -34,6 +34,7 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
       const requests: Array<ModelSelection & {sessionId: string}> = [];
       const metadataReads = {catalog: 0, model: 0};
       let onRequest: ((sessionId: string) => Promise<void>) | undefined;
+      let nextChunks: unknown[] | undefined;
       class OfflineAdapter extends llm.LlmAdapter {
         async listModels(provider: string) {
           metadataReads.catalog++;
@@ -48,6 +49,8 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
           requests.push(request);
           const action = onRequest; onRequest = undefined;
           if (action) await action(request.sessionId);
+          const chunks = nextChunks; nextChunks = undefined;
+          if (chunks) { yield* chunks; return; }
           yield {type: 'text-delta', index: 0, text: 'offline answer'};
           yield {type: 'block-end', index: 0, block: {type: 'text', text: 'offline answer'}};
           yield {type: 'finish', reason: {kind: 'completed'}};
@@ -60,9 +63,44 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
         apply(ctx: unknown) {adapter = new runtime.DshRuntime(ctx);}});
       return {root, adapter: adapter!, requests, metadataReads, toolApi: tools, llmApi: llm, promptApi: prompts,
         nextRequest(action: (sessionId: string) => Promise<void>) {onRequest = action;},
+        nextStream(chunks: unknown[]) {nextChunks = chunks;},
         symbols: cordis.symbols, persistenceApi: await module('dsh-session-persistence'),
         close: () => root.fiber.dispose()};
     }
+
+    it('runs the owner chat as a harness channel with host persona, open tools and live reasoning', async () => {
+      const directory = await mkdtemp(join(tmpdir(), `lark-harness-${family}-`)), host = await createHost(directory);
+      try {
+        host.root.get('tools').register(host.toolApi.defineTool({name: 'bash', description: 'bash', parameters: {},
+          output: {schema: {type: 'object', additionalProperties: false, properties: {}}, render: () => [{type: 'text', text: 'ok'}]},
+          async execute() { return {}; }}));
+        const memory = {privateChat: true, list: async () => [], search: async () => [],
+          remember: async () => { throw new Error('unused'); }, forget: async () => false};
+        const session = await host.adapter.create({cwd: directory, allowedTools: [], provider: 'offline', model: 'plain', presentation: true, mode: 'harness', memory});
+        const agent = host.root.get('agents').get(session.id);
+        expect(host.root.get('tools').schemas(agent).map((tool: {name: string}) => tool.name)).toEqual(expect.arrayContaining(['bash', 'lark_present', 'lark_memory_list']));
+        const prompt = host.promptApi.renderPrompt(await host.root.get('systemPrompt').assemble({scope: agent, agent}));
+        expect(prompt).toContain('PRIVATE HOST PERSONA');
+        expect(prompt).toContain('飞书私聊');
+        host.nextStream([
+          {type: 'reasoning-delta', index: 0, text: 'plan the chart'}, {type: 'block-end', index: 0, block: {type: 'reasoning', text: 'plan the chart'}},
+          {type: 'text-delta', index: 1, text: 'chart ready'}, {type: 'block-end', index: 1, block: {type: 'text', text: 'chart ready'}},
+          {type: 'finish', reason: {kind: 'completed'}},
+        ]);
+        host.nextRequest(async () => {
+          const result = await host.root.get('tools').execute({agent, name: 'lark_present', callId: 'present-harness', signal: new AbortController().signal,
+            arguments: {kind: 'chart', title: '示例数据', summary: '离线示例。', content: '{"type":"bar","series":["计数"],"data":[{"label":"A","values":[2]}]}'}});
+          expect(result.isError).toBe(false);
+        });
+        const events: unknown[] = [];
+        const result = await session.run('画图', new AbortController().signal, undefined, {stream: (event: unknown) => events.push(event)});
+        // The bot's own presented result arrives as a card artifact, never again as a host file.
+        expect(result).toMatchObject({text: 'chart ready', reasoning: 'plan the chart', artifacts: [{kind: 'chart'}]});
+        expect(result).not.toHaveProperty('files');
+        expect(events).toEqual(expect.arrayContaining([{type: 'reasoning', text: 'plan the chart'}, {type: 'text', text: 'chart ready'}]));
+        await session.dispose();
+      } finally {await host.close(); await rm(directory, {recursive: true, force: true});}
+    });
 
     it('runs the native presentation schema in a scoped turn without opening host tools', async () => {
       const directory = await mkdtemp(join(tmpdir(), `lark-present-${family}-`)), host = await createHost(directory);

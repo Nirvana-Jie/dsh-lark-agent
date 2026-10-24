@@ -11,7 +11,7 @@ import {BOT_SCOPES, CARD_SCOPE, LarkPlatform, LarkPlatformError, type Inspection
 import {ConnectionStore, type ConnectionRecord} from './store.js';
 import {createChallenge, PairingError, waitForPairing} from './pairing.js';
 import type {ConnectionEndpoint, ConnectionProfile, ConnectionSnapshot} from './protocol.js';
-import {documentScopesReady} from '../rich-scopes.js';
+import {defaultScopesReady} from '../rich-scopes.js';
 
 export interface OnboardingDependencies {
   platform: Pick<LarkPlatform, 'listProfiles' | 'registerNew' | 'saveNewProfile' | 'inspect' | 'configureAndPublish'> & Partial<Pick<LarkPlatform, 'enableDocuments'>>;
@@ -159,7 +159,7 @@ export class ConnectionController {
       this.documentJob = this.deps.platform.inspect(record.profile, aborter.signal).then(inspection => {
         if (!aborter.signal.aborted && !this.closed && this.record?.appId === record.appId) {
           if (inspection.appId === record.appId && (!record.botOpenId || inspection.botOpenId === record.botOpenId)) {
-            this.documentsReady = inspection.scopeStatus === 'verified' && documentScopesReady(inspection.grantedScopes);
+            this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
           }
         }
       }).catch(() => { /* A metadata outage must not turn an intentional pause into a failed connection. */ })
@@ -183,12 +183,12 @@ export class ConnectionController {
         if (this.documentsReady) return this.snapshot();
         if (this.documentJob) return this.snapshot();
         const record = this.record, aborter = this.documentAborter = new AbortController();
-        this.documentSetup = {phase: 'preparing', message: '正在准备文档与画板授权，聊天连接继续保持。'};
+        this.documentSetup = {phase: 'preparing', message: '正在准备默认权限授权，聊天连接继续保持。'};
         this.documentJob = this.deps.platform.enableDocuments(record.profile, info => {
           const url = officialDestination(info.url), expiresAt = Date.now() + info.expireIn * 1000;
           void (this.deps.qr ?? (url => QRCode.toDataURL(url, {width: 256, margin: 2})))(url).then(image => {
             if (aborter.signal.aborted || this.closed || this.documentAborter !== aborter) return;
-            this.documentSetup = {phase: 'scanning', message: '用飞书扫码补充文档与画板权限，无需重新创建或配对机器人。', qr: {url, image, expiresAt}};
+            this.documentSetup = {phase: 'scanning', message: '用飞书扫码补充实时回复、文档与画板权限，无需重新创建或配对机器人。', qr: {url, image, expiresAt}};
           }).catch(() => {if (!aborter.signal.aborted) {this.documentSetup = {phase: 'error', message: '二维码未能生成，请重试。'}; aborter.abort();}});
         }, aborter.signal).then(() => {
           if (!aborter.signal.aborted && !this.closed && this.record?.appId === record.appId) {this.documentsReady = true; this.documentSetup = undefined;}
@@ -300,7 +300,7 @@ export class ConnectionController {
     this.assertCurrent(signal);
     let record = this.record!;
     let inspection: Inspection = await this.deps.platform.inspect(record.profile, signal);
-    this.documentsReady = inspection.scopeStatus === 'verified' && documentScopesReady(inspection.grantedScopes);
+    this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
     this.assertCurrent(signal);
     if (inspection.appId !== record.appId || (record.botOpenId && inspection.botOpenId && record.botOpenId !== inspection.botOpenId)) {
       throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
@@ -375,8 +375,10 @@ export class ConnectionController {
     const cwd = join(directory, 'workspace');
     await mkdir(cwd, {recursive: true, mode: 0o700});
     return parseConfig({profile: record.profile, botOpenId: record.botOpenId, stateDir: join(directory, 'state'),
-      executable: this.deps.executable ?? 'lark-cli', users: [{openId: record.ownerOpenId, direct: true,
-      groupChats: [], cwd, allowedTools: []}], cardInteractions: record.cards, loadingReaction: record.loading, botMenu: this.menuReady}, directory);
+      executable: this.deps.executable ?? 'lark-cli', users: [{openId: record.ownerOpenId, direct: true, directMode: 'harness',
+      groupChats: [], cwd, allowedTools: []}], cardInteractions: record.cards, loadingReaction: record.loading, botMenu: this.menuReady,
+      // Without the CardKit scope a live card cannot be created and replies fall back to ordinary messages.
+      streamingCards: true}, directory);
   }
   private async bind(message: IncomingMessage, signal: AbortSignal): Promise<void> {
     this.assertCurrent(signal);

@@ -12,7 +12,7 @@ import {botLeaseDirectory, BotServiceStartError, type BotService} from '../src/b
 import {LockHeldError} from '../src/lock.js';
 import type {IncomingMessage} from '../src/message.js';
 import type {ConnectionEndpoint, ConnectionPhase} from '../src/onboarding/protocol.js';
-import {DOCUMENT_SCOPES} from '../src/rich-scopes.js';
+import {DOCUMENT_SCOPES, STREAMING_SCOPE} from '../src/rich-scopes.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (reason?: unknown) => void;
@@ -534,9 +534,18 @@ describe('connection controller lifecycle', () => {
     expect((await h.store.read())?.enabled).toBe(false);
   });
 
-  it('refreshes default capabilities after a paused restart without starting or authorizing anything', async () => {
+  it('asks an app with documents but no streaming scope to complete its default permissions', async () => {
     const h = await fixture({...baseRecord, enabled: false});
     h.platform.inspect.mockResolvedValue(inspection({grantedScopes: [...BOT_SCOPES, ...DOCUMENT_SCOPES]}));
+    await h.controller.initialize();
+    await vi.waitFor(() => expect(h.platform.inspect).toHaveBeenCalled());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(h.controller.snapshot().capabilities.documents).toBe(false);
+  });
+
+  it('refreshes default capabilities after a paused restart without starting or authorizing anything', async () => {
+    const h = await fixture({...baseRecord, enabled: false});
+    h.platform.inspect.mockResolvedValue(inspection({grantedScopes: [...BOT_SCOPES, ...DOCUMENT_SCOPES, STREAMING_SCOPE]}));
     await h.controller.initialize();
     await vi.waitFor(() => expect(h.controller.snapshot().capabilities.documents).toBe(true));
     expect(h.controller.snapshot().phase).toBe('paused');

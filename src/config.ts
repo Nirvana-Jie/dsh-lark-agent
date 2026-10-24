@@ -7,6 +7,12 @@ export interface UserPolicy {
   groupChats: string[];
   cwd: string;
   allowedTools: string[];
+  /**
+   * 'harness': this user's private chat is a channel into an ordinary Harness
+   * session, with the host's prompt, tools and approvals. Group chats always
+   * use the restricted assistant and allowedTools.
+   */
+  directMode: 'harness' | 'restricted';
 }
 
 export interface BotConfig {
@@ -30,6 +36,8 @@ export interface BotConfig {
   cardInteractions: boolean;
   loadingReaction: boolean;
   botMenu: boolean;
+  /** Stream harness-mode private replies into a CardKit card (needs cardkit:card:write). */
+  streamingCards: boolean;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -66,11 +74,12 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
     if (user.direct !== undefined && typeof user.direct !== 'boolean') throw new Error('user.direct must be boolean');
     const allowedTools = strings(user.allowedTools ?? [], 'user.allowedTools');
     if (allowedTools.some(t => !/^[a-zA-Z0-9_.:-]+$/.test(t) || t === 'run_code')) throw new Error('allowedTools requires exact tool names; run_code and wildcards are forbidden');
+    if (user.directMode !== undefined && user.directMode !== 'harness' && user.directMode !== 'restricted') throw new Error('user.directMode must be harness or restricted');
     return {
       openId: id(user.openId, 'ou', 'user.openId'),
       direct: user.direct === true,
       groupChats: strings(user.groupChats ?? [], 'user.groupChats').map(v => id(v, 'oc', 'group chat')),
-      cwd: resolve(cwd), allowedTools,
+      cwd: resolve(cwd), allowedTools, directMode: user.directMode ?? 'restricted',
     };
   });
   if (new Set(users.map(u => u.openId)).size !== users.length) throw new Error('Duplicate user.openId');
@@ -78,6 +87,7 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
   if (data.cardInteractions !== undefined && typeof data.cardInteractions !== 'boolean') throw new Error('cardInteractions must be boolean');
   if (data.loadingReaction !== undefined && typeof data.loadingReaction !== 'boolean') throw new Error('loadingReaction must be boolean');
   if (data.botMenu !== undefined && typeof data.botMenu !== 'boolean') throw new Error('botMenu must be boolean');
+  if (data.streamingCards !== undefined && typeof data.streamingCards !== 'boolean') throw new Error('streamingCards must be boolean');
   return {
     profile, botOpenId: id(data.botOpenId, 'ou', 'botOpenId'),
     executable: string(data.executable ?? 'lark-cli', 'executable'),
@@ -85,7 +95,8 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
     provider: data.provider === undefined ? undefined : string(data.provider, 'provider'),
     model: data.model === undefined ? undefined : string(data.model, 'model'),
     users,
-    turnTimeoutMs: integer(data.turnTimeoutMs, 120_000, 1000, 1_800_000, 'turnTimeoutMs'),
+    // A harness-mode chat does research and tool work, and may wait minutes for an approval.
+    turnTimeoutMs: integer(data.turnTimeoutMs, users.some(user => user.directMode === 'harness') ? 900_000 : 120_000, 1000, 1_800_000, 'turnTimeoutMs'),
     idleTimeoutMs: integer(data.idleTimeoutMs, 1_800_000, 1000, 86_400_000, 'idleTimeoutMs'),
     maxSessions: integer(data.maxSessions, 100, 1, 1000, 'maxSessions'),
     maxSessionsPerUser: integer(data.maxSessionsPerUser, 10, 1, 100, 'maxSessionsPerUser'),
@@ -98,6 +109,7 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
     cardInteractions: data.cardInteractions === true,
     loadingReaction: data.loadingReaction === true,
     botMenu: data.botMenu === true,
+    streamingCards: data.streamingCards === true,
   };
 }
 export async function loadConfig(path: string): Promise<BotConfig> {

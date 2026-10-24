@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOT_SCOPES, SETUP_SCOPES, CONFIGURE_SCOPE, CARD_SCOPE, LarkPlatform, LarkPlatformError,
   commandRunner, type AppRegistrar, type PlatformRunner, type RegisteredApp } from '../src/onboarding/lark-platform.js';
 import {BOT_MENU_EVENT} from '../src/bot-menu.js';
-import {DOCUMENT_SCOPES} from '../src/rich-scopes.js';
+import {DOCUMENT_SCOPES, STREAMING_SCOPE} from '../src/rich-scopes.js';
 
 vi.mock('node:child_process', () => ({spawn: vi.fn()}));
 
@@ -64,11 +64,11 @@ describe('Lark onboarding platform registration and profiles', () => {
     const original = f.run.getMockImplementation()!;
     let upgraded = false;
     f.run.mockImplementation(async (args, options) => upgraded && args[4] === '/open-apis/application/v6/scopes'
-      ? ok({scopes: DOCUMENT_SCOPES.map(scope_name => ({scope_name, grant_status: 1}))}) : original(args, options));
+      ? ok({scopes: [...DOCUMENT_SCOPES, STREAMING_SCOPE].map(scope_name => ({scope_name, grant_status: 1}))}) : original(args, options));
     const registerApp = vi.fn<AppRegistrar>(async options => {options.onQRCodeReady({url: 'https://accounts.feishu.cn/verify?opaque=fixture', expireIn: 600}); upgraded = true; return {client_id: 'cli_test', client_secret: 'must-never-be-returned'};});
     const platform = new LarkPlatform({run: f.run, registerApp}), qr = vi.fn();
     expect(await platform.enableDocuments(profile.name, qr, new AbortController().signal)).toBeUndefined();
-    expect(registerApp.mock.calls[0]![0]).toMatchObject({appId: 'cli_test', addons: {preset: false, scopes: {tenant: [...DOCUMENT_SCOPES]}}});
+    expect(registerApp.mock.calls[0]![0]).toMatchObject({appId: 'cli_test', addons: {preset: false, scopes: {tenant: [...DOCUMENT_SCOPES, STREAMING_SCOPE]}}});
     expect(registerApp.mock.calls[0]![0].createOnly).not.toBe(true); expect(registerApp.mock.calls[0]![0].addons?.scopes?.user).toBeUndefined();
     expect(f.run.mock.calls.some(([args]) => args[0] === 'config')).toBe(false);
     await platform.enableDocuments(profile.name, qr, new AbortController().signal);
@@ -100,7 +100,7 @@ describe('Lark onboarding platform registration and profiles', () => {
     expect(await platform.registerNew({name: 'dsh 助手', signal, onQRCode, onStatus})).toEqual(registered);
     const options = registerApp.mock.calls[0]![0];
     expect(options).toMatchObject({createOnly: true, signal, addons: {preset: false,
-      scopes: {tenant: [...new Set([...BOT_SCOPES, ...SETUP_SCOPES, ...DOCUMENT_SCOPES])]}, events: {items: {tenant: ['im.message.receive_v1', BOT_MENU_EVENT]}}}});
+      scopes: {tenant: [...new Set([...BOT_SCOPES, ...SETUP_SCOPES, ...DOCUMENT_SCOPES, STREAMING_SCOPE])]}, events: {items: {tenant: ['im.message.receive_v1', BOT_MENU_EVENT]}}}});
     expect(options.addons?.scopes?.user).toBeUndefined();
     expect(options.addons?.scopes?.tenant).not.toContain(CONFIGURE_SCOPE);
     expect(options.addons?.scopes?.tenant).not.toContain(CARD_SCOPE);

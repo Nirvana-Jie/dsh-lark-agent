@@ -6,6 +6,7 @@
     {
       "openId": "ou_REPLACE_WITH_ALICE_OPEN_ID",
       "direct": true,
+      "directMode": "restricted",
       "groupChats": [
         "oc_REPLACE_WITH_ALLOWED_GROUP"
       ],
@@ -31,5 +32,6 @@
   "chunkBytes": 4000,
   "responseMode": "auto",
   "cardInteractions": false,
-  "loadingReaction": false
+  "loadingReaction": false,
+  "streamingCards": false
 }

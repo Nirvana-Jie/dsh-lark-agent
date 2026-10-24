@@ -72,7 +72,11 @@ The Feishu entry works only while the host is online: not when the app is closed
 
 | In Feishu, you… | The assistant… |
 | --- | --- |
-| Send a request | Shows a `Typing` reaction while it works (on by default for new bots), then replies in segments |
+| Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card, with its thinking and tool steps folded inside |
+| Ask for something that needs your OK | Sends a confirmation card: tap **允许一次** (allow once) or **拒绝** (deny); no answer within 5 minutes means it won't run |
+| Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
+| Use `/permission`, or 权限模式 in the model settings card | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking |
+| Ask for the result file | Sends files from its workspace straight to the chat |
 | Say "lead with the conclusion from now on" | Remembers the preference |
 | Keep chatting, or use `/sessions`, `/new` | Continues the topic, returns to an earlier one, or starts fresh |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |
@@ -80,7 +84,7 @@ The Feishu entry works only while the host is online: not when the app is closed
 | Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2`, opening that Feishu session in the app also shows a local preview |
 | Use `/model`, `/thinking` | Switches between the host's configured models and thinking depth |
 
-By default it answers only your own private chat. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
+By default it answers only your own private chat. In that chat the assistant is your Harness itself: the tools it can use and the actions that need your confirmation follow the permission settings on your computer. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
 
 ## Good to know
 

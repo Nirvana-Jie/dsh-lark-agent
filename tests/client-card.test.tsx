@@ -18,7 +18,7 @@ describe('Feishu connection settings', () => {
       ...(endpoint === 'enable-documents' ? {documentSetup: {phase: 'scanning', message: '扫码补充授权', qr: {url: 'https://open.feishu.cn/verify', image: 'data:image/png;base64,YQ==', expiresAt: Date.now() + 60000}}} : {})})));
     render(<ConnectionCard api={new ConnectionApi({call})} />);
     fireEvent.click(await screen.findByRole('button', {name: '补充默认权限'}));
-    expect(await screen.findByAltText('文档与画板补充授权二维码')).toBeTruthy();
+    expect(await screen.findByAltText('默认权限补充授权二维码')).toBeTruthy();
     expect(screen.getByRole('heading', {name: '可以在飞书找我了'})).toBeTruthy();
     fireEvent.click(screen.getByRole('button', {name: '返回聊天连接'}));
     await waitFor(() => expect(call.mock.calls.some(call => call[1] === 'cancel-documents')).toBe(true));

@@ -141,7 +141,17 @@ function markdown(text: string): {text: string; balanced: boolean; blocks: strin
   return {text: output, balanced: !fence, blocks};
 }
 
-function plainLabel(text: string, limit: number): string {
+/** Model text for a card markdown element, with platform extensions made inert. */
+export function cardMarkdown(text: string): string {
+  return markdown(text).text;
+}
+
+/** Top-level blocks split at blank lines outside code fences, for cutting long text without breaking Markdown. */
+export function markdownBlocks(text: string): string[] {
+  return markdown(text).blocks;
+}
+
+export function plainLabel(text: string, limit: number): string {
   return pointSlice(text.replace(/<[^>]*>/g, '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/!?(\[([^\]]+)\])\([^)]*\)/g, '$2').replace(/[`*#_~]/g, '').replace(/\s+/g, ' ').trim(), limit);
 }

@@ -1,6 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
+import { basename, isAbsolute, relative, sep } from 'node:path';
 import type { BotConfig, UserPolicy } from './config.js';
-import type { AgentPolicy, RuntimeSession, ModelSelection, ModelCatalog } from './dsh-runtime.js';
+import type { AgentPolicy, RuntimeSession, ModelSelection, ModelCatalog, ApprovalPrompt, QuestionAnswer, TurnObserver, TurnStreamEvent, UserQuestion, PermissionOption } from './dsh-runtime.js';
 import { DshRuntimeError } from './dsh-runtime.js';
 import type { MessageLedger } from './ledger.js';
 import { authorize, chunksByBytes, ownerKey, parseMessage, sessionKey, type IncomingMessage } from './message.js';
@@ -13,7 +15,11 @@ import {ModelPreferencesError, type ModelPreferencesStore, type ModelPreferenceR
 import {modelChoice, thinkingChoice, modelControlPanel, modelStateText, sameSelection, isModelQuestion} from './model-controls.js';
 import {botMenuCommand, BOT_MENU_EVENT} from './bot-menu.js';
 import {CommandFeedback} from './command-feedback.js';
-import {PresentationError, presentationDraft, presentationCard, presentationText, type PresentationDraft} from './presentation.js';
+import {PresentationError, presentationDraft, presentationCard, presentationText, type DeliveredFile, type PresentationDraft} from './presentation.js';
+import {LiveReply, type LiveCardTransport, type LiveReplyFinal} from './live-reply.js';
+import {answeredText, approvalCard, questionAnswers, questionCard, simpleQuestion, type InteractionAnswer} from './interaction-cards.js';
+import {permissionPanel, permissionStateText, type PermissionView} from './permission-controls.js';
+import type {PermissionPreferencesStore} from './permission-preferences.js';
 import type {ArtifactStore, ArtifactContext, SavedArtifact} from './artifacts.js';
 import type {ArtifactPublisher} from './artifact-publisher.js';
 
@@ -22,6 +28,7 @@ export interface Runtime {
   resume(policy: AgentPolicy, id: string): Promise<RuntimeSession>;
   catalog?(): Promise<ModelCatalog>;
   resolveModelSelection?(selection?: ModelSelection): Promise<ModelSelection>;
+  permissionOptions?(): PermissionOption[];
 }
 export interface BotState {
   sessions: Pick<SessionStore, 'current' | 'list' | 'add' | 'activate' | 'archive' | 'rename' | 'touch'>
@@ -31,6 +38,7 @@ export interface BotState {
   modelPreferences?: Pick<ModelPreferencesStore, 'get' | 'set'>;
   directChats?: {get(openId: string): Promise<string | undefined>; record(openId: string, chatId: string): Promise<void>};
   artifacts?: Pick<ArtifactStore, 'add' | 'get' | 'list' | 'claimPublish' | 'publication' | 'submit'>;
+  permissionPreferences?: Pick<PermissionPreferencesStore, 'get' | 'set'>;
 }
 export interface Transport {
   reply(messageId: string, text: string, options: {idempotencyKey: string; inThread: boolean}): Promise<void>;
@@ -40,6 +48,11 @@ export interface Transport {
   createFeedback?(target: {openId: string} | {messageId: string; inThread: boolean}, payload: ReplyPayload,
     options: {idempotencyKey: string}): Promise<string>;
   updateFeedback?(messageId: string, payload: ReplyPayload): Promise<void>;
+  createCardEntity?(card: Record<string, unknown>): Promise<string>;
+  replyCardEntity?(messageId: string, cardId: string, options: {idempotencyKey: string; inThread: boolean}): Promise<void>;
+  streamCardText?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
+  updateCardEntity?(cardId: string, card: Record<string, unknown>, sequence: number): Promise<void>;
+  replyFile?(messageId: string, path: string, options: {idempotencyKey: string; inThread: boolean; image: boolean}): Promise<void>;
 }
 interface RoutedMessage extends IncomingMessage {
   requestId?: string;
@@ -50,10 +63,43 @@ interface RoutedMessage extends IncomingMessage {
   menu?: boolean;
   modelChanged?: boolean;
   modelView?: ModelView;
+  permissionChanged?: boolean;
   formValues?: unknown;
 }
 interface ModelView {catalog: ModelCatalog; selection: ModelSelection; preference: ModelPreferenceRecord}
 class ArtifactDeliveryError extends Error {}
+/** A running turn's approval or question, answered by a card click outside that turn's queue. */
+interface Interaction {
+  ownerId: string;
+  chatId: string;
+  settle(answer: InteractionAnswer): boolean;
+  stop(): void;
+}
+type InteractionOutcome<T> = {kind: 'answer'; value: T} | {kind: 'timeout' | 'cancelled'};
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+const QUESTION_TIMEOUT_MS = 10 * 60_000;
+// After a live card cannot be created (for example, before the CardKit scope is
+// granted), use ordinary replies for a while instead of failing every turn.
+const LIVE_RETRY_MS = 10 * 60_000;
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const TIMEOUT_TEXT = '本次处理超时，已请求取消。请缩小问题范围后重试。';
+const STOPPING_TEXT = '连接正在关闭，本次处理已停止。';
+
+/** Only a regular file inside the user's own workspace is uploaded; anything else is just named. */
+async function uploadable(workspace: string, path: string): Promise<{path: string; image: boolean} | {reason: string}> {
+  let real: string;
+  try { real = await realpath(path); } catch { return {reason: '找不到这个文件'}; }
+  const inside = relative(workspace, real);
+  if (!inside || inside === '..' || inside.startsWith('..' + sep) || isAbsolute(inside)) return {reason: '不在这个私聊的工作区内，没有上传'};
+  let info;
+  try { info = await stat(real); } catch { return {reason: '无法读取'}; }
+  if (!info.isFile()) return {reason: '不是普通文件'};
+  if (info.size === 0) return {reason: '是空文件'};
+  if (info.size > MAX_FILE_BYTES) return {reason: '超过飞书 30 MB 的文件上限'};
+  if (/[\u0000-\u001f\u007f]/.test(basename(real))) return {reason: '文件名含有无法发送的字符'};
+  return {path: real, image: /\.(?:png|jpe?g|gif|webp)$/i.test(real) && info.size <= MAX_IMAGE_BYTES};
+}
 export type Audit = (event: {stage: string; messageId?: string; userId?: string; sessionKey?: string; elapsedMs?: number}) => void;
 interface Lane {
   user: UserPolicy;
@@ -74,6 +120,9 @@ const HELP = `直接把想做的事告诉我就好。
 
 私聊底部菜单可以新建话题、找历史对话，或调整模型和思考深度。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
+const HARNESS_HELP = `
+
+这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或在 设置 → 模型 里点「权限模式」）可以切换权限，比如改成不再询问的「完全权限」。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：归档当前会话，下一条消息开启新会话；长期记忆保留
 /sessions：选择以前的对话；/sessions detail 查看完整列表和 ID
@@ -83,6 +132,7 @@ const ADVANCED_HELP = `高级命令（按需使用）：
 /stop：停止当前处理并取消排队消息
 /results：查看当前话题的作品；/result <ID>：查看内容；/publish <ID>：在本人私聊生成飞书文档或画板
 /model：查看当前模型并选择；/thinking：选择当前模型支持的思考深度
+/permission：本人私聊切换 Harness 权限模式（如仅可查看、工作区内修改、完全权限）
 /remember <内容>：私聊保存私密个人记忆；群聊仅保存当前聊天记忆
 /remember --chat <内容>：只在当前聊天／话题保存记忆
 /memory：列出可用记忆（最多 20 条）
@@ -134,6 +184,8 @@ export class BotBridge {
   private readonly failedDisposals = new Set<RuntimeSession>();
   private cardActionsReady = false;
   private readonly progress: ProgressTracker;
+  private readonly interactions = new Map<string, Interaction>();
+  private liveUnavailableUntil = 0;
 
   constructor(private readonly config: BotConfig, private readonly runtime: Runtime,
     private readonly transport: Transport, private readonly ledger: MessageLedger,
@@ -165,12 +217,12 @@ export class BotBridge {
       return;
     }
     let formValues: unknown;
-    if (binding.command.startsWith('/answer ')) {
+    if (binding.command.startsWith('/answer ') || binding.command.startsWith('/reply ')) {
       if (data.action_name !== 'dsh_submit' || typeof data.form_value !== 'string' || data.form_value.length > 8000) return;
       try {formValues = JSON.parse(data.form_value);} catch {return;}
       if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return;
     }
-    const mutation = /^\/(?:(?:new|resume|forget|answer)(?: |$)|(?:model|thinking) use )/.test(binding.command);
+    const mutation = /^\/(?:(?:new|resume|forget|answer)(?: |$)|(?:model|thinking|permission) use )/.test(binding.command);
     return {messageId: data.message_id, senderId: binding.ownerId, chatId: binding.chatId,
       chatType: binding.chatType, threadId: binding.threadId, text: binding.command,
       requestId: `card:${data.event_id}`, actionNonce: mutation ? binding.nonce : undefined,
@@ -223,6 +275,12 @@ export class BotBridge {
         message.requestId ?? message.messageId])).digest('hex');
       if (!await this.ledger.claim(claimId) || this.stopped) return;
       if (!message.menu && message.chatType === 'p2p') await this.state.directChats?.record(message.senderId, message.chatId);
+      // A running turn holds its queue while it waits for its approval or
+      // question, so those answers must not queue behind it.
+      if (message.requestId?.startsWith('card:') && /^\/(?:approve|deny|choose|reply) /.test(message.text)) {
+        await this.answerInteraction(message);
+        return;
+      }
       const key = sessionKey(message, this.config);
       let lane = this.lanes.get(key);
       if (message.text === '/stop') {
@@ -245,7 +303,7 @@ export class BotBridge {
       const current = lane;
       const generation = lane.generation;
       current.pending++; this.pending++;
-      const finishProgress = message.menu ? () => undefined : this.progress.begin(message.messageId);
+      const finishProgress = message.menu || this.streams(message, user) ? () => undefined : this.progress.begin(message.messageId);
       const acceptedAt = Date.now();
       const job = current.tail.then(async () => {
         if (this.stopped || generation !== current.generation) return;
@@ -344,47 +402,223 @@ export class BotBridge {
     lane.controller = controller;
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.config.turnTimeoutMs);
+    const harness = message.chatType === 'p2p' && lane.user.directMode === 'harness';
+    let live: LiveReply | undefined;
+    // Once a live card exists it carries this turn's whole outcome; nothing else is sent as text.
+    const conclude = async (final: LiveReplyFinal): Promise<void> => {
+      const card = live!;
+      live = undefined;
+      if (!await card.finish(final)) this.audit({stage: 'live-card-unconfirmed', messageId: message.messageId});
+    };
     try {
       await this.ensureSession(message, lane);
       if (controller.signal.aborted) {
-        if (timedOut) await this.reply(message, '本次处理超时，已请求取消。请缩小问题范围后重试。');
+        if (timedOut) await this.reply(message, TIMEOUT_TEXT);
         return;
       }
       const context = this.context(message);
       const memoryText = promptMemories(await this.state.memories.list(context));
       const artifactsText = this.state.artifacts && lane.saved ? JSON.stringify((await this.state.artifacts.list(this.artifactContext(message, lane.saved.id)))
         .map(row => ({id: row.id, title: row.draft.title, kind: row.draft.kind}))) : undefined;
-      const result = await lane.session!.run(text, controller.signal, {memoryText, ...(artifactsText ? {artifactsText} : {})});
+      if (this.streams(message, lane.user)) {
+        const candidate = new LiveReply(this.liveTransport()!, {messageId: message.messageId, inThread: Boolean(message.threadId),
+          idempotencyKey: createHash('sha256').update(JSON.stringify([this.config.botOpenId, message.requestId ?? message.messageId, 'live'])).digest('hex').slice(0, 48)},
+        {audit: stage => this.audit({stage, messageId: message.messageId})});
+        if (await candidate.open()) live = candidate;
+        else this.liveUnavailableUntil = Date.now() + LIVE_RETRY_MS;
+      }
+      const turnContext = {memoryText, ...(artifactsText ? {artifactsText} : {})};
+      // Only the owner's harness-mode chat can be asked anything; a restricted session gets no hooks at all.
+      const observer: TurnObserver | undefined = live || harness ? {
+        ...(live ? {stream: (event: TurnStreamEvent) => live?.push(event)} : {}),
+        ...(harness ? {approve: (prompt: ApprovalPrompt, signal: AbortSignal) => this.approve(message, prompt, signal),
+          ask: (questions: UserQuestion[], signal: AbortSignal) => this.ask(message, questions, signal)} : {}),
+      } : undefined;
+      const result = await (observer ? lane.session!.run(text, controller.signal, turnContext, observer)
+        : lane.session!.run(text, controller.signal, turnContext));
       // Native conversation data must be durable before acknowledging a turn.
       await lane.session!.checkpoint();
       await this.state.sessions.touch(this.sessionContext(message), lane.saved!.id);
       clearTimeout(timer);
       if (controller.signal.aborted || this.stopped) {
-        if (timedOut && !this.stopped) await this.reply(message, '本次处理超时，已请求取消。请缩小问题范围后重试。');
+        if (live) await conclude({phase: 'stopped', note: timedOut ? TIMEOUT_TEXT : this.stopped ? STOPPING_TEXT : '已停止。'});
+        else if (timedOut && !this.stopped) await this.reply(message, TIMEOUT_TEXT);
         return;
       }
       const answer = typeof result === 'string' ? result : result.text;
       const artifacts = typeof result === 'string' ? [] : result.artifacts;
+      const files = typeof result === 'string' ? [] : result.files ?? [];
       const bounded = Array.from(answer).slice(0, this.config.maxOutputChars).join('');
+      const truncated = bounded.length < answer.length;
       // The answer is already in native history. Send it before artifact work
       // that can fail, so a storage limit cannot swallow a complete reply.
-      if (bounded || !artifacts.length) await this.reply(message, bounded ? bounded + (bounded.length < answer.length ? '\n\n（回复已截断）' : '') : 'dsh 本次没有返回文本。', controller.signal);
+      if (live) await conclude({phase: 'done', answer: bounded || (artifacts.length || files.length ? '已整理好，见下方。' : 'dsh 本次没有返回文本。'),
+        ...(typeof result !== 'string' && result.reasoning ? {reasoning: result.reasoning} : {}), ...(truncated ? {note: '回复已截断。'} : {})});
+      else if (bounded || !artifacts.length) await this.reply(message, bounded ? bounded + (truncated ? '\n\n（回复已截断）' : '') : 'dsh 本次没有返回文本。', controller.signal);
       await this.presentArtifacts(message, lane, artifacts, controller.signal);
+      await this.deliverFiles(message, lane, files, controller.signal);
       this.audit({stage: 'replied', messageId: message.messageId});
     } catch (error) {
       clearTimeout(timer);
       if (error instanceof ArtifactDeliveryError) throw error;
+      const known = error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError || error instanceof PresentationError;
+      if (live) {
+        const stopped = timedOut || controller.signal.aborted || this.stopped;
+        await conclude({phase: stopped ? 'stopped' : 'failed', note: timedOut ? TIMEOUT_TEXT : this.stopped ? STOPPING_TEXT
+          : controller.signal.aborted ? '已停止。' : known ? (error as Error).message : '处理没有完成，请稍后重试。'}).catch(() => undefined);
+        return;
+      }
       if (this.stopped) return;
-      if (timedOut) await this.reply(message, '本次处理超时，已请求取消。请缩小问题范围后重试。');
+      if (timedOut) await this.reply(message, TIMEOUT_TEXT);
       else if (!controller.signal.aborted) {
         // Transport failures may have delivered partial output. Do not send an extra ambiguous retry.
-        if (error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError || error instanceof PresentationError) await this.reply(message, error.message);
+        if (known) await this.reply(message, (error as Error).message);
         else this.audit({stage: 'delivery-or-runtime-failed', messageId: message.messageId});
       }
     } finally {
       clearTimeout(timer);
       lane.controller = undefined;
     }
+  }
+
+  /** Whether this message's reply streams into a live card, which makes the typing reaction redundant. */
+  private streams(message: RoutedMessage, user: UserPolicy): boolean {
+    return message.chatType === 'p2p' && user.directMode === 'harness' && this.config.streamingCards && this.config.responseMode !== 'text'
+      && !message.text.startsWith('/') && Date.now() >= this.liveUnavailableUntil && this.liveTransport() !== undefined;
+  }
+
+  private liveTransport(): LiveCardTransport | undefined {
+    const transport = this.transport;
+    return transport.createCardEntity && transport.replyCardEntity && transport.streamCardText && transport.updateCardEntity
+      ? transport as LiveCardTransport : undefined;
+  }
+
+  private canInteract(message: RoutedMessage): boolean {
+    return message.chatType === 'p2p' && !this.stopped && this.cardActionsReady && this.config.cardInteractions && this.config.responseMode !== 'text'
+      && Boolean(this.state.actions && this.transport.createFeedback && this.transport.updateFeedback);
+  }
+
+  private issueAction(message: RoutedMessage, command: string): string {
+    return this.state.actions!.issue({ownerId: message.senderId, chatId: message.chatId, chatType: message.chatType,
+      threadId: message.threadId, sourceMessageId: message.messageId, command});
+  }
+
+  /** Ask the owner about one Harness approval. Anything but an explicit allow denies the call. */
+  private async approve(message: RoutedMessage, prompt: ApprovalPrompt, signal: AbortSignal): Promise<boolean> {
+    if (!this.canInteract(message) || signal.aborted) return false;
+    const id = randomBytes(6).toString('hex');
+    // Register before the card exists, so even an immediate click finds it.
+    const pending = this.waitForAnswer(id, message, answer => answer.verb === 'approve' ? true : answer.verb === 'deny' ? false : undefined,
+      signal, APPROVAL_TIMEOUT_MS);
+    const card = await this.openInteraction(message, id, approvalCard(prompt, {allow: this.issueAction(message, `/approve ${id}`),
+      deny: this.issueAction(message, `/deny ${id}`)}));
+    if (!card) { pending.cancel(); return false; }
+    const outcome = await pending.result;
+    const allowed = outcome.kind === 'answer' && outcome.value;
+    await this.closeInteraction(card, approvalCard(prompt, undefined, outcome.kind === 'answer' ? (allowed ? '已允许这一次。' : '已拒绝，这次不会执行。')
+      : outcome.kind === 'timeout' ? '5 分钟内没有确认，已按拒绝处理。' : '本次处理已停止，没有执行。'));
+    return allowed;
+  }
+
+  /** Ask the owner a Harness question. Without an answer the host gets an error and continues. */
+  private async ask(message: RoutedMessage, questions: UserQuestion[], signal: AbortSignal): Promise<QuestionAnswer[]> {
+    const unavailable = '这里无法用卡片提问。请把问题写在回复里，由主人直接回答。';
+    if (!this.canInteract(message)) throw new Error(unavailable);
+    const id = randomBytes(6).toString('hex');
+    const first = questions[0]!;
+    const tokens = simpleQuestion(questions)
+      ? {choose: Array.from({length: first.options.length + 1}, (_unused, index) => this.issueAction(message, `/choose ${id} ${index}`))}
+      : {reply: this.issueAction(message, `/reply ${id}`)};
+    const pending = this.waitForAnswer(id, message, answer => questionAnswers(questions, answer), signal, QUESTION_TIMEOUT_MS);
+    const card = await this.openInteraction(message, id, questionCard(questions, tokens));
+    if (!card) { pending.cancel(); throw new Error(unavailable); }
+    const outcome = await pending.result;
+    await this.closeInteraction(card, questionCard(questions, undefined, outcome.kind === 'answer' ? answeredText(questions, outcome.value)
+      : outcome.kind === 'timeout' ? '10 分钟内没有回答，已按未回答继续。' : '本次处理已停止，提问已关闭。'));
+    if (outcome.kind !== 'answer') throw new Error(outcome.kind === 'timeout' ? '主人没有在 10 分钟内回答。' : '提问已取消。');
+    return outcome.value;
+  }
+
+  private waitForAnswer<T>(id: string, message: RoutedMessage, parse: (answer: InteractionAnswer) => T | undefined,
+    signal: AbortSignal, timeoutMs: number): {result: Promise<InteractionOutcome<T>>; cancel(): void} {
+    let finish!: (outcome: InteractionOutcome<T>) => void;
+    const result = new Promise<InteractionOutcome<T>>(resolve => {
+      let done = false;
+      const timer = setTimeout(() => finish({kind: 'timeout'}), timeoutMs);
+      const onAbort = () => finish({kind: 'cancelled'});
+      const entry: Interaction = {ownerId: message.senderId, chatId: message.chatId, stop: onAbort,
+        settle: answer => {
+          const value = parse(answer);
+          if (value === undefined || done) return false;
+          finish({kind: 'answer', value});
+          return true;
+        }};
+      finish = outcome => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        if (this.interactions.get(id) === entry) this.interactions.delete(id);
+        resolve(outcome);
+      };
+      this.interactions.set(id, entry);
+      signal.addEventListener('abort', onAbort, {once: true});
+      if (signal.aborted) onAbort();
+    });
+    return {result, cancel: () => finish({kind: 'cancelled'})};
+  }
+
+  private async openInteraction(message: RoutedMessage, id: string, payload: ReplyPayload): Promise<string | undefined> {
+    if (payload.kind !== 'card' || this.stopped) return;
+    const idempotencyKey = createHash('sha256').update(JSON.stringify([this.config.botOpenId, message.requestId ?? message.messageId, 'interaction', id]))
+      .digest('hex').slice(0, 48);
+    try {
+      return await this.transport.createFeedback!({messageId: message.messageId, inThread: Boolean(message.threadId)}, payload, {idempotencyKey});
+    } catch {
+      this.audit({stage: 'interaction-card-failed', messageId: message.messageId});
+      return;
+    }
+  }
+
+  private async closeInteraction(messageId: string, payload: ReplyPayload): Promise<void> {
+    if (payload.kind !== 'card') return;
+    try { await this.transport.updateFeedback!(messageId, payload); }
+    catch { this.audit({stage: 'interaction-update-failed', messageId}); }
+  }
+
+  private async answerInteraction(message: RoutedMessage): Promise<void> {
+    const match = /^\/(approve|deny|choose|reply) ([a-f0-9]{12})(?: ([0-9]{1,2}))?$/.exec(message.text);
+    const pending = match ? this.interactions.get(match[2]!) : undefined;
+    if (!match || !pending || pending.ownerId !== message.senderId || pending.chatId !== message.chatId) {
+      await this.reply(message, '这张卡片已经失效。需要的话，直接在聊天里告诉我。');
+      return;
+    }
+    if (!pending.settle({verb: match[1] as InteractionAnswer['verb'], ...(match[3] === undefined ? {} : {index: Number(match[3])}),
+      ...(message.formValues === undefined ? {} : {formValues: message.formValues})})) await this.reply(message, '这次选择无效，请在卡片上重新选择后提交。');
+  }
+
+  /** Send files the host's delivery tool presented, from this user's workspace only. */
+  private async deliverFiles(message: RoutedMessage, lane: Lane, files: readonly DeliveredFile[], signal: AbortSignal): Promise<void> {
+    if (!files.length || signal.aborted || this.stopped) return;
+    const workspace = await realpath(lane.user.cwd).catch(() => undefined);
+    const notes: string[] = [];
+    for (const [index, file] of files.entries()) {
+      if (signal.aborted || this.stopped) return;
+      const name = basename(file.path);
+      const checked = workspace && this.transport.replyFile ? await uploadable(workspace, file.path) : {reason: '这个连接不能发送文件'};
+      if ('reason' in checked) { notes.push(`${name}：${checked.reason}（电脑上的位置：${file.path}）`); continue; }
+      const idempotencyKey = createHash('sha256').update(JSON.stringify([this.config.botOpenId, message.requestId ?? message.messageId, 'file', index, checked.path]))
+        .digest('hex').slice(0, 48);
+      try {
+        await this.transport.replyFile!(message.messageId, checked.path, {idempotencyKey, inThread: Boolean(message.threadId), image: checked.image});
+        this.audit({stage: 'file-sent', messageId: message.messageId});
+      } catch {
+        // The upload may still have arrived. Name it instead of sending again.
+        notes.push(`${name}：发送结果没有确认，请在电脑上查看 ${file.path}`);
+        this.audit({stage: 'file-send-unknown', messageId: message.messageId});
+      }
+    }
+    if (notes.length) await this.reply(message, `有 ${notes.length} 个文件没有发到这里：\n${notes.join('\n')}`, signal);
   }
 
   private commandFeedback(message: RoutedMessage): CommandFeedback | undefined {
@@ -436,6 +670,7 @@ export class BotBridge {
     const context = this.context(message);
     return {
       cwd: lane.user.cwd, allowedTools: lane.user.allowedTools,
+      mode: message.chatType === 'p2p' && lane.user.directMode === 'harness' ? 'harness' : 'restricted',
       provider: this.config.provider, model: this.config.model,
       presentation: Boolean(this.state.artifacts),
       ...selection,
@@ -474,6 +709,7 @@ export class BotBridge {
       : await this.runtime.create(this.policy(message, lane, modelPreference?.selection));
     try {
       await handle.checkpoint();
+      await this.applyPermission(message, lane, handle);
       if (!modelPreference && handle.modelSelection && this.state.modelPreferences) {
         await this.state.modelPreferences.set(this.context(message), handle.modelSelection(), {expectedRevision: null});
       }
@@ -517,8 +753,10 @@ export class BotBridge {
     const args = (match[2] ?? '').trim();
     const context = this.context(message);
     const conversation = this.sessionContext(message);
-    if (command === 'help') return args === 'advanced' ? ADVANCED_HELP : HELP;
+    if (command === 'help') return args === 'advanced' ? ADVANCED_HELP
+      : HELP + (message.chatType === 'p2p' && lane.user.directMode === 'harness' ? HARNESS_HELP : '');
     if (command === 'model' || command === 'thinking') return this.modelCommand(message, lane, command, args);
+    if (command === 'permission') return this.permissionCommand(message, lane, args);
     if (command === 'whoami') return `用户：${message.senderId}\n聊天：${message.chatId}\n范围：${message.chatType === 'p2p' ? '私聊' : '群聊'}${message.threadId ? '／独立话题' : ''}\n身份由飞书验证。个人记忆默认仅本人私聊可读，群聊仅可用本人明确授权的条目。`;
     if (command === 'status') {
       const saved = await this.state.sessions.current(conversation);
@@ -561,6 +799,7 @@ export class BotBridge {
       const handle = await this.runtime.resume(this.policy(message, lane, preference?.selection), target.nativeId);
       try {
         await handle.checkpoint();
+        await this.applyPermission(message, lane, handle);
         if (!preference && handle.modelSelection && this.state.modelPreferences) await this.state.modelPreferences.set(context, handle.modelSelection(), {expectedRevision: null});
         await this.bindRestoredSession(conversation, target, handle);
         lane.saved = await this.state.sessions.activate(conversation, target.id);
@@ -611,6 +850,52 @@ export class BotBridge {
         : '找不到可删除的记忆。';
     }
     return '未知命令。发送 /help 查看可用命令。';
+  }
+
+  private harness(message: RoutedMessage, lane: Lane): boolean {
+    return message.chatType === 'p2p' && lane.user.directMode === 'harness';
+  }
+
+  /** The host's presets, from the live session when there is one. Undefined when the host offers none. */
+  private permissionView(lane: Lane): PermissionView | undefined {
+    const live = lane.session?.permissionState?.();
+    if (live) return live;
+    const options = this.runtime.permissionOptions?.() ?? [];
+    return options.length ? {options} : undefined;
+  }
+
+  /** What this chat runs: the live session's preset, else the chat's saved choice. */
+  private async permissionChoice(message: RoutedMessage, lane: Lane): Promise<PermissionView | undefined> {
+    if (lane.unavailable) await this.unload(lane);
+    const view = this.permissionView(lane);
+    if (!view) return;
+    if (view.current) return view;
+    const saved = await this.state.permissionPreferences?.get(this.context(message));
+    return saved && view.options.some(option => option.id === saved) ? {...view, current: saved} : view;
+  }
+
+  /** Owner-only: switch this private chat's Harness permission preset, like the App's selector. */
+  private async permissionCommand(message: RoutedMessage, lane: Lane, args: string): Promise<string> {
+    if (!this.harness(message, lane)) return '权限模式只能在你和我的私聊里切换。';
+    const view = await this.permissionChoice(message, lane);
+    if (!view) throw new DshRuntimeError('PERMISSION_UNAVAILABLE');
+    if (!args) return permissionStateText(view);
+    const choice = /^use ([a-z][a-z0-9-]{0,39})$/.exec(args)?.[1];
+    const option = view.options.find(item => item.id === choice);
+    if (!option) return '请通过权限模式卡片选择，或发送 /permission 查看可用选项。';
+    // Save first: a later session in this chat starts in the chosen mode even if the live switch fails.
+    await this.state.permissionPreferences?.set(this.context(message), option.id);
+    lane.session?.setPermission?.(option.id);
+    message.permissionChanged = true;
+    return `已切换为「${option.name}」。这个私聊里的对话都会使用它；电脑上其他会话不受影响。`;
+  }
+
+  /** Bring a newly opened harness session to the chat's saved permission preset. */
+  private async applyPermission(message: RoutedMessage, lane: Lane, handle: RuntimeSession): Promise<void> {
+    if (!this.harness(message, lane) || !handle.setPermission) return;
+    const saved = await this.state.permissionPreferences?.get(this.context(message));
+    const state = saved ? handle.permissionState?.() : undefined;
+    if (state && state.current !== saved && state.options.some(option => option.id === saved)) handle.setPermission(saved!);
   }
 
   private async modelState(message: RoutedMessage, lane: Lane): Promise<ModelView> {
@@ -669,17 +954,28 @@ export class BotBridge {
   private async commandPanel(message: RoutedMessage, lane: Lane): Promise<ReplyPanel | undefined> {
     const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(message.text);
     const command = match?.[1]?.toLowerCase(), args = (match?.[2] ?? '').trim();
+    const interactive = this.cardActionsReady && this.config.cardInteractions && Boolean(this.state.actions);
+    const issue = (target: string, extra: Partial<Parameters<NonNullable<BotState['actions']>['issue']>[0]> = {}) => this.state.actions!.issue({
+      ownerId: message.senderId, chatId: message.chatId, chatType: message.chatType, threadId: message.threadId,
+      sourceMessageId: message.messageId, command: target, ...extra});
     if ((command === 'model' || command === 'thinking') && (!args || /^page [0-9]{1,4}$/.test(args) || message.modelChanged)) {
       const state = await this.modelState(message, lane);
       const current = await this.state.sessions.current(this.sessionContext(message));
-      const interactive = this.cardActionsReady && this.config.cardInteractions && Boolean(this.state.actions);
-      return modelControlPanel(command, state.catalog, state.selection, (label, target, mutation, primary) => {
+      const panel = modelControlPanel(command, state.catalog, state.selection, (label, target, mutation, primary) => {
         if (!interactive) return;
-        const token = this.state.actions!.issue({ownerId: message.senderId, chatId: message.chatId, chatType: message.chatType,
-          threadId: message.threadId, sourceMessageId: message.messageId, command: target, expectedSessionId: current?.id ?? null,
+        const token = issue(target, {expectedSessionId: current?.id ?? null,
           ...(mutation ? {expectedModelRevision: state.preference?.revision ?? null} : {})});
         return {label, value: {token}, primary};
       }, /^page /.test(args) ? Number(args.slice(5)) : 0, message.modelChanged);
+      // The settings menu reaches the permission switch from here, without another menu entry.
+      if (interactive && this.harness(message, lane) && this.permissionView(lane)) panel.actions = [...panel.actions ?? [], {label: '权限模式', value: {token: issue('/permission')}}];
+      return panel;
+    }
+    if (command === 'permission' && (!args || message.permissionChanged) && this.harness(message, lane)) {
+      const view = await this.permissionChoice(message, lane);
+      if (!view) return;
+      return permissionPanel(view, (label, target, primary, confirm) => interactive
+        ? {label, value: {token: issue(target)}, primary, ...(confirm ? {confirm} : {})} : undefined, message.permissionChanged);
     }
     // Ordinary conversation and diagnostics stay out of management cards.
     // A card is useful here because the user explicitly wants to pick a topic.
@@ -688,7 +984,6 @@ export class BotBridge {
     const current = await this.state.sessions.current(conversation);
     const sessions = await this.state.sessions.list(conversation);
     if (!sessions.length) return;
-    const interactive = this.cardActionsReady && this.config.cardInteractions && Boolean(this.state.actions);
     const actions: ReplyAction[] = [];
     const add = (label: string, target: string, options: {primary?: boolean; confirm?: ReplyAction['confirm']; expectedSessionId?: string | null} = {}) => {
       if (!interactive) return;
@@ -856,6 +1151,7 @@ export class BotBridge {
   async stop(): Promise<void> {
     this.stopped = true;
     for (const lane of this.lanes.values()) { lane.controller?.abort(); lane.session?.cancel(); }
+    for (const interaction of [...this.interactions.values()]) interaction.stop();
     await Promise.allSettled([...this.admissions]);
     await Promise.all([...this.lanes.values()].map(lane => lane.tail));
     await this.sweepTail;
