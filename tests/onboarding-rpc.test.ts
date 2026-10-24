@@ -1,4 +1,4 @@
-import {mkdtemp, readdir, rm} from 'node:fs/promises';
+import {mkdtemp, readdir, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import type {Context} from '@deepseek-ai/cordis';
@@ -100,6 +100,36 @@ describe('official registration destinations', () => {
     'https://user:password@open.feishu.cn/x', 'javascript:alert(1)', 'https://open.feishu.cn:9999/x'])('rejects unsafe destination %s', url => {
       expect(() => officialDestination(url)).toThrow();
     });
+});
+
+describe('upgrade notice in the settings snapshot', () => {
+  it('adds a newer published release to status and command results without waiting for npm', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dsh-onboarding-update-'));
+    try {
+      let handler!: Handler;
+      const effects: Array<() => () => Promise<void>> = [];
+      const ctx = {
+        get: (name: string) => name === 'connection' ? {rpc: {handle(_channel: string, callback: Handler) {handler = callback; return async () => undefined;}}} : undefined,
+        effect: (factory: () => () => Promise<void>) => {effects.push(factory);},
+      };
+      let answer!: (value: string) => void;
+      const latestVersion = vi.fn(() => new Promise<string | undefined>(resolve => {answer = resolve;}));
+      await applyOnboarding(ctx as unknown as Context, {dataDir, executable: '/nonexistent/lark-cli', latestVersion});
+      const signal = new AbortController().signal;
+      const first = await handler('status', {}, signal, owner) as {ok: true; value: Record<string, unknown>};
+      expect(first.value).toMatchObject({phase: 'idle'});
+      expect(first.value).not.toHaveProperty('update');
+      const installed = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version as string;
+      answer('999.0.0');
+      await vi.waitFor(async () => expect(await handler('status', {}, signal, owner)).toMatchObject({ok: true,
+        value: {phase: 'idle', update: {current: installed, latest: '999.0.0'}}}));
+      expect(await handler('cancel', {}, signal, owner)).toMatchObject({ok: true, value: {update: {latest: '999.0.0'}}});
+      expect(latestVersion).toHaveBeenCalledOnce();
+      await effects[0]!()();
+    } finally {
+      await rm(dataDir, {recursive: true, force: true});
+    }
+  });
 });
 
 describe('connection settings owned by another running host', () => {

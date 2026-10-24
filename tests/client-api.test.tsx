@@ -5,6 +5,12 @@ import type {ConnectionSnapshot} from '../src/onboarding/protocol.js';
 const idle: ConnectionSnapshot = {phase: 'idle', message: '', busy: false, capabilities: {cards: true, loading: true}};
 
 describe('owner connection API', () => {
+  it('accepts a release notice made of plain version numbers only', () => {
+    expect(parseSnapshot({...idle, update: {current: '0.2.0', latest: '0.3.0'}}).update).toEqual({current: '0.2.0', latest: '0.3.0'});
+    expect(() => parseSnapshot({...idle, update: {current: '0.2.0', latest: '<b>0.3</b>'}})).toThrow();
+    expect(() => parseSnapshot({...idle, update: {current: '0.2.0'}})).toThrow();
+    expect(() => parseSnapshot({...idle, update: '0.3.0'})).toThrow();
+  });
   it('uses the host RPC and preserves caller cancellation', async () => {
     const call = vi.fn(async () => ({ok: true, value: idle}));
     const signal = new AbortController().signal;

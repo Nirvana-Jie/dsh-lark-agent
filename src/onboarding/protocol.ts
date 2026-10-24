@@ -13,6 +13,8 @@ export interface ConnectionSnapshot {
   action?: {label: string; url: string};
   capabilities: {cards: boolean; loading: boolean; documents?: boolean};
   documentSetup?: {phase: 'preparing' | 'scanning' | 'error'; message: string; qr?: {url: string; image: string; expiresAt: number}};
+  /** A newer published release of this plugin, with the installed version. */
+  update?: {current: string; latest: string};
 }
 
 export interface ConnectionProfile {name: string; appId: string; label: string}
