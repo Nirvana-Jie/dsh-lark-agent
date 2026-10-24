@@ -1,6 +1,6 @@
 {
   "name": "dsh-lark-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reach your DeepSeek Harness assistant from Feishu / Lark: a dsh plugin built on the official Lark CLI",
   "keywords": [
     "deepseek",
