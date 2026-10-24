@@ -82,13 +82,13 @@
 - **本人私聊的权限：** 私聊里的助手就是电脑上的 Harness，权限按这个私聊选择的模式执行（没选过时跟随电脑上的默认）；切到「完全权限」后，在飞书发一句话就能执行命令，请按需设置。确认和提问卡片只发给已绑定的本人，按钮校验操作者、聊天并且一次有效。工作区是专用目录，但不是文件系统沙箱。思考过程和工具进度只显示在本人私聊。
 - **群共享：** 由本人在私聊用 `/memory share` 逐条授权，之后可用于本人所有获准的群会话，群回复全员可见；群模型不自动写入长期记忆。共享、撤销或删除已共享条目会轮换授权：旧群历史不再恢复，旧授权下未发出的回复丢弃，已发出的无法撤回。
 - **数据在哪里：** 通道状态、记忆和本地作品存在运行 Harness 的电脑（默认 `~/.dsh-larkbot/`，完整目录见[备份清单](#备份升级与迁移)），原生会话日志由宿主保存。目录 0700、文件 0600，**并非加密**；`/forget` 与 `/new` 不会安全擦除历史、日志或备份。消息经过飞书和模型服务商，云端文档与画板存于飞书。
-- **版本检查：** 设置页打开时，插件最多每 6 小时向 `registry.npmjs.org` 查询一次本包的最新版本号，只发送包名，不含账号、聊天或设备信息；查询失败时不提示。团队配置部署不打开设置页，不做这项查询。
+- **版本检查：** 设置页打开时，插件最多每 6 小时向 `registry.npmjs.org` 查询一次本包的最新版本号及其发布时间，只发送包名，不含账号、聊天或设备信息；查询失败时不提示。团队配置部署不打开设置页，不做这项查询。
 - **投递：** 消息先持久化去重再处理，宿主崩溃或结果未知时可能没有回复；为免重复执行，发送、工具执行和云端创建不自动重放，不保证每条消息恰好处理一次。需要时先确认上次操作是否生效再重发。
 - **不提供：** 以你个人飞书身份操作、任意飞书业务操作、附件理解、群聊中的 Harness 工具与确认、定时工作流、完整 HTML 执行、工作区外或群内的文件交付、群内云文档分享、多副本部署。
 
 ## 升级
 
-有新版本时，设置页顶部提示「飞书插件有新版本」，点「升级」显示下面的步骤：桌面版按钮打开插件列表（App `0.2.1-rc.3` 起；更早的版本请切到「插件列表」），Web 给出可复制的更新命令。第三方插件在 App 里只能卸载后重新添加，插件不会自行下载或替换自己。
+新版本发布满 24 小时后，设置页顶部提示「飞书插件有新版本」：App 与 `dsh plugin` 使用的 pnpm 11 默认跳过发布不满一天的版本（`minimumReleaseAge`），这期间安装或更新（包括 `@latest`）都会装上之前的版本。点「升级」显示下面的步骤：桌面版按钮打开插件列表（App `0.2.1-rc.3` 起；更早的版本请切到「插件列表」），Web 给出可复制的更新命令。第三方插件在 App 里只能卸载后重新添加，插件不会自行下载或替换自己。
 
 扫码接入（源码 / 团队部署见[备份、升级与迁移](#备份升级与迁移)）：
 
@@ -168,7 +168,7 @@ App 路由契约（[client-modern-host](tests/client-modern-host.test.tsx) 测�
 
 **从源码安装：** `pnpm pack` 经 `prepack` 构建 `dist/` 后打包，最后一行输出 tgz 文件名；安装时用 tgz 的绝对路径代替包名（App「添加插件」或 `dsh plugin --profile web add <tgz 绝对路径> --allow-build=protobufjs`），运行中重建见[备份、升级与迁移](#备份升级与迁移)。
 
-**发布 npm：** `main` 受保护，只能经 PR 合并，且两个 CI 任务须通过。维护者在 PR 中更新版本（`pnpm version patch --no-git-tag-version`，或 minor / major），合并后按 AGENTS.md 完成发布前检查，给 `main` 上的合并提交打标签并推送（`git tag v<版本> origin/main && git push origin v<版本>`）。[release.yml](.github/workflows/release.yml) 校验标签与 `package.json` 版本一致且在 `main` 上，运行 `pnpm check`、构建并核对包内文件，再经 npm Trusted Publishing（OIDC，仓库不存 npm token）用 `npm stage publish` 暂存并附来源证明：含 `-` 的预发布版本发到 `next`，其余发到 `latest`；最后创建 GitHub Release。暂存版本在维护者用 2FA 批准前不公开：在 npmjs.com 该包的 Staged Packages 页批准，或 `npm stage list dsh-lark-agent` 查到 ID 后 `npm stage approve <stage-id>`；已暂存的版本不要重跑流水线。npm 上已有的版本只补建 Release，不重复发布。工作流依赖 npm 包设置中的 Trusted Publisher（仓库 `Nirvana-Jie/dsh-lark-agent`、工作流 `release.yml`，只需 npm stage publish 权限）。
+**发布 npm：** `main` 受保护，只能经 PR 合并，且两个 CI 任务须通过。维护者在 PR 中更新版本（`pnpm version patch --no-git-tag-version`，或 minor / major），合并后按 AGENTS.md 完成发布前检查，给 `main` 上的合并提交打标签并推送（`git tag v<版本> origin/main && git push origin v<版本>`）。[release.yml](.github/workflows/release.yml) 校验标签与 `package.json` 版本一致且在 `main` 上，运行 `pnpm check`、构建并核对包内文件，再经 npm Trusted Publishing（OIDC，仓库不存 npm token）用 `npm stage publish` 暂存并附来源证明：含 `-` 的预发布版本发到 `next`，其余发到 `latest`；最后创建 GitHub Release。暂存版本在维护者用 2FA 批准前不公开：在 npmjs.com 该包的 Staged Packages 页批准，或 `npm stage list dsh-lark-agent` 查到 ID 后 `npm stage approve <stage-id>`；已暂存的版本不要重跑流水线。批准后 24 小时内，App 与 `dsh plugin` 仍装上一版本，设置页也不提示；当天实机验证用精确版本号安装。npm 上已有的版本只补建 Release，不重复发布。工作流依赖 npm 包设置中的 Trusted Publisher（仓库 `Nirvana-Jie/dsh-lark-agent`、工作流 `release.yml`，只需 npm stage publish 权限）。
 
 **图标与媒体：** 替换图标时保持比例与透明背景，客户端内联的图标不超过 256 像素；文档媒体（README 与本文）放 `assets/readme/`，只留在仓库、不进 npm 包。README.md 也是 npm 页面，图片和文档链接须用 GitHub 绝对地址。npm 包只含运行所需的 `dist`（不含 source map）与 `cordis.patch.yml`。
 
@@ -345,6 +345,7 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm pack
 | 现象 | 检查顺序 |
 | --- | --- |
 | 没有「飞书」设置页，或页面无法加载 | 插件已装入当前宿主并启用；`dsh plugin` 若报 `ERR_PNPM_IGNORED_BUILDS`（随后 dsh 提示 `pnpm failed in profile directory`），运行 `dsh plugin --profile <profile> approve-builds '!protobufjs'` 后重启 → 源码安装须用 `pnpm pack` 的产物（含 `dist/client.cjs`）→ `configFile` 与 `DSH_LARK_CONFIG` 均为空（见[两种运行方式](#两种运行方式)） |
+| 安装失败，提示某个较旧版本与当前 dsh 不兼容（插件页显示的却是更新的版本） | 新版本发布不满 24 小时，pnpm 11 改装了之前的版本（安装详情里 pnpm 输出的 `+ dsh-lark-agent <版本>` 是实际装上的版本）→ 发布满 24 小时后点「重试」→ CLI 急需时用精确版本号安装：`dsh plugin --profile <profile> update dsh-lark-agent@<版本>`，pnpm 会把该版本记入 profile 的 `minimumReleaseAgeExclude` |
 | 提示找不到 Lark CLI | Lark CLI 装在宿主所在机器 → 插件启动时只查找一次 `PATH`、`~/.local/bin`、`~/.npm-global/bin`、`/opt/homebrew/bin`、`/usr/local/bin`，后装须重启宿主或重新启用插件 → 仍不行则在插件配置 `executable` 填绝对路径 |
 | 配对词发送后未连接 | 机器人已发布 → 发在本人私聊 → 配对词纯文本原样单独发送且未过期，否则「换一个配对词」→ 只认应用创建者（新建即扫码账号）→ 需要时点「这是我，完成连接」 |
 | 「飞书长连接尚未就绪」或没有 `[im-larkbot] ready` | 事件为长连接订阅且已发布 → 专用 profile 的 bot 认证（`auth status --json --verify`）→ CLI 在服务 `PATH` 或团队配置 `executable` 中 → 网络 |
