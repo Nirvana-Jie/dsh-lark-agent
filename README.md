@@ -35,7 +35,7 @@ In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.5.0 --allow-build=protobufjs
 ```
 
 Then restart `dsh web`.
@@ -51,7 +51,7 @@ Then restart `dsh web`.
 
 ### Update
 
-When a new version has been out for a day, the Feishu settings page shows a notice with these steps (in the desktop app it also opens the plugin list for you). Until then the desktop app and `dsh plugin` still install the previous version, because pnpm 11 skips releases less than 24 hours old. If an install picks an older version that your DeepSeek Harness rejects as incompatible, see [Troubleshooting](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#排障).
+When a new version has been out for a day, the Feishu settings page shows a notice with these steps (in the desktop app it also opens the plugin list for you). Until then, installs without an exact version, including `@latest`, still select the previous version because pnpm 11 skips releases less than 24 hours old. Use the exact version in the installation example above to install this release immediately after publication. If an install picks an older version that your DeepSeek Harness rejects as incompatible, see [Troubleshooting](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#排障).
 
 1. On the Feishu settings page, click **暂停连接** (pause) and back up as described in [Upgrade](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级).
 2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (this in-app upgrade hasn't been tested end to end yet; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.
