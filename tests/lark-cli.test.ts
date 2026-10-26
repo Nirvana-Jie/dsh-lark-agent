@@ -54,9 +54,31 @@ describe('confirmed native topic creation', () => {
       receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
     const cli = new LarkCli({profile: 'test-bot'});
     await cli.openTopic({chatId: 'oc_chat'}, 'new topic', {idempotencyKey: 'topic'});
-    expect(JSON.parse(calls[0]!.input)).toMatchObject({receive_id: 'oc_chat', uuid: 'topic:root'});
+    const root = JSON.parse(calls[0]!.input);
+    expect(root).toMatchObject({receive_id: 'oc_chat', uuid: 'topic:root', msg_type: 'interactive'});
+    expect(JSON.parse(root.content)).toMatchObject({schema: '2.0', header: {title: {content: 'new topic'}, subtitle: {content: 'dsh-lark-agent'}}});
+    expect(root.content).not.toContain('打开话题继续');
+    expect(root.content).not.toContain('@机器人');
     expect(calls[0]?.args).toContain('{"receive_id_type":"chat_id"}');
     expect(calls[1]?.args).toContain('/open-apis/im/v1/messages/om_root/reply');
+    expect(JSON.parse(calls[1]!.input).reply_in_thread).toBe(true);
+    expect(calls).toHaveLength(3); // entry card, one threaded reply, optional read; no standalone confirmation
+  });
+
+  it('preserves explicit text compatibility and the group mention requirement', async () => {
+    const calls = commands([receipt({message_id: 'om_root', chat_id: 'oc_chat'}),
+      receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
+    await new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'Group topic', {idempotencyKey: 'topic', chatType: 'group', textOnly: true});
+    const root = JSON.parse(calls[0]!.input);
+    expect(root.msg_type).toBe('text'); expect(JSON.parse(root.content).text).toContain('每条消息仍需 @机器人');
+    expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).toContain('@机器人');
+  });
+
+  it('stops after an unknown opening reply, preserving the already sent entry without retrying it', async () => {
+    const calls = commands([receipt({message_id: 'om_root', chat_id: 'oc_chat'}), '{invalid']);
+    await expect(new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'New topic', {idempotencyKey: 'topic'})).rejects.toThrow();
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(calls[0]!.input).msg_type).toBe('interactive');
   });
 
   it('accepts an already threaded root without sending another opening reply', async () => {

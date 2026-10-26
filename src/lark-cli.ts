@@ -2,8 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import type { ReplyPayload } from './replies.js';
+import {renderPanel, type ReplyPayload} from './replies.js';
 import {topicLink, type TopicReceipt} from './topic-store.js';
+import {topicEntryPanel} from './topic-cards.js';
 
 export type LarkEventKey = 'im.message.receive_v1' | 'card.action.trigger' | 'application.bot.menu_v6';
 
@@ -319,12 +320,14 @@ export class LarkCli {
 
   /** Open a native topic and keep its raw receipt; the reply shortcut drops thread_id. */
   async openTopic(target: {chatId: string; messageId?: string}, title: string,
-    options: {idempotencyKey: string}): Promise<TopicReceipt> {
+    options: {idempotencyKey: string; chatType?: 'p2p' | 'group'; textOnly?: boolean}): Promise<TopicReceipt> {
     if (!target || typeof target.chatId !== 'string' || !/^oc_[A-Za-z0-9_-]{1,128}$/.test(target.chatId)
       || (target.messageId !== undefined && !/^om_[A-Za-z0-9_-]{1,256}$/.test(target.messageId))
       || typeof title !== 'string' || !title.trim() || Array.from(title).length > 80 || /[\u0000-\u001f\u007f-\u009f]/.test(title)
-      || !/^[A-Za-z0-9._:-]{1,45}$/.test(options?.idempotencyKey)) throw new Error('Invalid Lark topic target.');
-    const text = `话题：${title}\n请在这个话题里继续。群聊中仍需 @机器人。`;
+      || !/^[A-Za-z0-9._:-]{1,45}$/.test(options?.idempotencyKey)
+      || (options.chatType !== undefined && options.chatType !== 'p2p' && options.chatType !== 'group')
+      || (options.textOnly !== undefined && typeof options.textOnly !== 'boolean')) throw new Error('Invalid Lark topic target.');
+    const text = `话题：${title}\n请在这个话题里继续。${options.chatType === 'group' ? '群聊中每条消息仍需 @机器人。' : ''}`;
     const request = async (path: string, data: Record<string, unknown>, params?: string) => {
       const result = await this.executeJson(['api', 'POST', path, ...(params ? ['--params', params] : []),
         '--data', '-', '--as', 'bot', '--format', 'json'], JSON.stringify(data), 'reply', this.commandTimeoutMs);
@@ -339,12 +342,13 @@ export class LarkCli {
     if (!anchor) {
       // Menu events and replies inside another topic cannot be used as a new root.
       // Confirm the root before replying; never invent a message ID or retry an unknown send.
-      receipt = await request('/open-apis/im/v1/messages', {receive_id: target.chatId, msg_type: 'text',
-        content: JSON.stringify({text}), uuid: `${options.idempotencyKey}:root`}, '{"receive_id_type":"chat_id"}');
+      const content = options.textOnly ? JSON.stringify({text}) : this.feedbackContent(renderPanel(topicEntryPanel(title, options.chatType ?? 'p2p')));
+      receipt = await request('/open-apis/im/v1/messages', {receive_id: target.chatId, msg_type: options.textOnly ? 'text' : 'interactive',
+        content, uuid: `${options.idempotencyKey}:root`}, '{"receive_id_type":"chat_id"}');
       anchor = receipt.message_id as string;
     }
     if (!receipt?.thread_id) receipt = await request(`/open-apis/im/v1/messages/${anchor}/reply`,
-      {msg_type: 'text', content: JSON.stringify({text: target.messageId ? text : '在这里继续这个话题。'}),
+      {msg_type: 'text', content: JSON.stringify({text: target.messageId ? text : `在这里发送消息继续。${options.chatType === 'group' ? '每条消息仍需 @机器人。' : ''}`}),
         reply_in_thread: true, uuid: `${options.idempotencyKey}:open`});
     if (typeof receipt.thread_id !== 'string' || !/^(?:om|omt)_[A-Za-z0-9_-]{1,256}$/.test(receipt.thread_id)) {
       throw new Error('Lark topic creation did not return a thread ID; delivery is unknown.');

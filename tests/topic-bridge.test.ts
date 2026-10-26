@@ -523,11 +523,35 @@ describe('one native Lark topic per session', () => {
       app_id: 'cli_example', event_key: 'dsh.new'});
     expect(h.openTopic).toHaveBeenCalledWith({chatId: 'oc_alice'}, '新话题', expect.any(Object));
     expect(h.reply).not.toHaveBeenCalled();
-    expect(h.sendUser).toHaveBeenCalledOnce();
+    expect(h.sendUser).not.toHaveBeenCalled(); // openTopic's entry already owns the thread
     expect(h.create).not.toHaveBeenCalled();
     const topic = (await h.topics())[0]!;
     await h.bridge.accept(h.event('question in the new topic', {thread_id: topic.threadId}));
     expect(h.create).toHaveBeenCalledOnce();
+  });
+
+  it.each(['p2p', 'group'] as const)('uses one independent entry for %s /new without posting another confirmation', async type => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    const make = type === 'group' ? h.group : h.event;
+    await h.bridge.accept(make('/new'));
+    expect(h.openTopic).toHaveBeenCalledWith({chatId: type === 'group' ? 'oc_group' : 'oc_alice'}, '新话题',
+      expect.objectContaining({chatType: type, textOnly: false}));
+    expect(h.reply).not.toHaveBeenCalled(); expect(h.replyRich).not.toHaveBeenCalled(); expect(h.sendUser).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled();
+    const topic = (await h.topics(make('scope')))[0]!;
+    await h.bridge.accept(make('First question', {thread_id: topic.threadId}));
+    expect(h.create).toHaveBeenCalledOnce();
+  });
+
+  it('posts one legacy entry and reuses it on subsequent navigation', async () => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    const saved = await h.state.sessions.add(h.legacyContext(), randomUUID(), 'Old project');
+    await h.bridge.accept(h.event(`/resume ${saved.id}`));
+    expect(h.openTopic).toHaveBeenCalledOnce(); expect(h.replyRich).not.toHaveBeenCalled(); expect(h.reply).not.toHaveBeenCalled();
+    await h.bridge.accept(h.event(`/resume ${saved.id}`));
+    expect(h.openTopic).toHaveBeenCalledOnce(); expect(h.replyRich).toHaveBeenCalledOnce();
+    expect(h.replyRich.mock.calls[0]![1]).toMatchObject({kind: 'card', fallbackText: expect.stringContaining('打开话题继续')});
+    expect(h.create).not.toHaveBeenCalled(); expect(h.resume).not.toHaveBeenCalled();
   });
 
   it('updates the clicked history card when creating a topic for a legacy session', async () => {
@@ -541,5 +565,20 @@ describe('one native Lark topic per session', () => {
     expect(h.reply).not.toHaveBeenCalled(); expect(h.replyRich).not.toHaveBeenCalled();
     expect(h.updateFeedback).toHaveBeenCalledWith('om_history', expect.objectContaining({kind: 'card', fallbackText: expect.stringContaining('打开话题继续')}));
     expect(h.resume).not.toHaveBeenCalled();
+  });
+
+  it('keeps the private history picker available after its new-topic button posts a separate entry', async () => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    await h.state.sessions.add(h.legacyContext(), randomUUID(), 'Existing topic');
+    const token = h.state.actions.issue({ownerId: 'ou_alice', chatId: 'oc_alice', chatType: 'p2p', threadId: '',
+      sourceMessageId: 'om_history', command: '/new', expectedSessionId: null});
+    await h.bridge.accept({type: 'card.action.trigger', action_tag: 'button', event_id: 'evt_new_entry', operator_id: 'ou_alice',
+      chat_id: 'oc_alice', message_id: 'om_history', action_value: JSON.stringify({token})});
+    expect(h.openTopic).toHaveBeenCalledOnce(); expect(h.create).not.toHaveBeenCalled();
+    expect(h.replyRich).not.toHaveBeenCalled(); expect(h.reply).not.toHaveBeenCalled();
+    const result = h.updateFeedback.mock.calls.at(-1)!;
+    expect(result[0]).toBe('om_history'); expect(component(result[1], 'select_static')).toBeDefined();
+    expect(result[1]).toMatchObject({kind: 'card', card: {header: {title: {content: '以前的对话'}}}, fallbackText: expect.stringContaining('新话题已创建')});
+    expect(JSON.stringify(result[1])).not.toContain('话题已就绪');
   });
 });

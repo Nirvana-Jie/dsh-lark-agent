@@ -60,7 +60,8 @@ export interface Transport {
   streamCardText?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   updateCardEntity?(cardId: string, card: Record<string, unknown>, sequence: number): Promise<void>;
   replyFile?(messageId: string, path: string, options: {idempotencyKey: string; inThread: boolean; image: boolean}): Promise<void>;
-  openTopic?(target: {chatId: string; messageId?: string}, title: string, options: {idempotencyKey: string}): Promise<TopicReceipt>;
+  openTopic?(target: {chatId: string; messageId?: string}, title: string,
+    options: {idempotencyKey: string; chatType?: 'p2p' | 'group'; textOnly?: boolean}): Promise<TopicReceipt>;
   topicLink?(messageId: string): Promise<string | undefined>;
 }
 interface RoutedMessage extends IncomingMessage {
@@ -75,7 +76,7 @@ interface RoutedMessage extends IncomingMessage {
   permissionChanged?: boolean;
   formValues?: unknown;
   topic?: TopicBinding;
-  topicResult?: {binding: TopicBinding; title: string};
+  topicResult?: {binding: TopicBinding; title: string; newEntry?: boolean};
   conversationKey?: string;
   laneKey?: string;
   foreignTopic?: boolean;
@@ -157,7 +158,7 @@ const HELP = `直接把想做的事告诉我就好。
 比如：帮我理清一个问题、整理一段文字，或者接着刚才的话题继续。你也可以在私聊告诉我，以后希望我怎样配合你。
 
 私聊底部菜单可以新建话题、搜索和选择历史对话，或调整模型和思考深度。
-私聊和群聊的新问题都会开一个飞书话题；请在话题里继续，群聊中仍需 @我。
+私聊和群聊的新问题都会开一个飞书话题；新话题卡片下方点「回复话题」继续，群聊中仍需 @我。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
 const HARNESS_HELP = `
 
@@ -489,6 +490,9 @@ export class BotBridge {
       let failed = false;
       try {
         response = await this.command(message, lane);
+        // A newly posted entry card already confirms the operation and owns its thread.
+        // A clicked private picker is handled above and still updates its existing card.
+        if (message.topicResult?.newEntry) return;
         if (this.config.responseMode !== 'text' && (message.menu ? this.transport.sendRichUser : this.transport.replyRich)) panel = await this.commandPanel(message, lane);
       }
       catch (error) {
@@ -877,7 +881,8 @@ export class BotBridge {
     const idempotencyKey = createHash('sha256').update(JSON.stringify([this.config.botOpenId,
       message.requestId ?? message.messageId, 'topic', sessionId ?? 'new'])).digest('hex').slice(0, 40);
     const target = {chatId: message.chatId,
-      ...(!message.threadId && !message.menu && !message.requestId?.startsWith('card:') && !sessionId ? {messageId: message.messageId} : {})};
+      ...(!message.threadId && !message.menu && !message.requestId?.startsWith('card:') && !sessionId && !message.text.startsWith('/')
+        ? {messageId: message.messageId} : {})};
     let receipt: TopicReceipt | undefined;
     const release = this.reserveTopic(message);
     try {
@@ -903,7 +908,8 @@ export class BotBridge {
           }
         }
       }
-      const send = async () => {if (!this.stopped) receipt = await this.transport.openTopic!(target, title, {idempotencyKey});};
+      const send = async () => {if (!this.stopped) receipt = await this.transport.openTopic!(target, title,
+        {idempotencyKey, chatType: message.chatType, textOnly: this.config.responseMode === 'text'});};
       // Do not read or mutate MemoryStore inside its authorization/send critical section.
       if (message.chatType === 'group') await this.state.memories.withGroupAccess(this.context(message), message.groupAccessKey!, send);
       else await send();
@@ -1093,7 +1099,7 @@ export class BotBridge {
       if (args) return '用法：/new；创建新会话后可用 /rename <标题> 命名。';
       if (this.topicsEnabled()) {
         const binding = await this.createTopic(message, '新话题', this.newTopicKey(message));
-        message.topicResult = {binding, title: '新话题'};
+        message.topicResult = {binding, title: '新话题', newEntry: true};
         return this.topicNavigation(binding, '新话题');
       }
       await this.unload(lane);
@@ -1130,7 +1136,7 @@ export class BotBridge {
           return '在你当前的聊天中找不到这个会话。';
         }
         const binding = await this.continueTopic(message, target);
-        message.topicResult = {binding, title: target.title};
+        message.topicResult = {binding, title: target.title, newEntry: !target.topic};
         return this.topicNavigation(binding, target.title);
       }
       // Resolve authorization before touching the running handle or native log.
@@ -1379,7 +1385,7 @@ export class BotBridge {
     card?: {pending?: boolean; error?: string; notice?: string}): Promise<ReplyPanel | undefined> {
     const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(message.text);
     const command = match?.[1]?.toLowerCase(), args = (match?.[2] ?? '').trim();
-    if (message.topicResult && !message.sessionView && !card?.pending && !card?.error && !card?.notice) {
+    if (message.topicResult && command !== 'new' && !message.sessionView && !card?.pending && !card?.error && !card?.notice) {
       const {binding, title} = message.topicResult;
       const text = this.topicNavigation(binding, title);
       return {title: '话题已就绪', tone: 'success', summary: `打开「${preview(title, 40)}」继续`,
@@ -1416,7 +1422,7 @@ export class BotBridge {
     }
     // Ordinary conversation and diagnostics stay out of management cards.
     // A card is useful here because the user explicitly wants to pick a topic.
-    const topic = (card || message.sessionView) && (command === 'resume' || command === 'new');
+    const topic = (card || message.sessionView || message.topicResult) && (command === 'resume' || command === 'new');
     if ((command !== 'sessions' || args === 'detail') && !topic) return;
     const conversation = this.sessionContext(message);
     const current = await this.state.sessions.current(conversation);
@@ -1427,6 +1433,8 @@ export class BotBridge {
       : busy ? {text: target ? `正在打开「${preview(target.title, 40)}」…` : command === 'new' ? '正在开始新话题…' : '正在查找话题…', tone: 'pending'}
       : card?.notice ? {text: card.notice}
       : topic && command === 'resume' && target ? undefined
+      : command === 'new' && message.topicResult ? {text: message.topicResult.binding.link
+        ? `新话题已创建。[进入新话题](${message.topicResult.binding.link})` : '新话题已创建，请在新卡片下方回复话题。'}
       : topic ? {text: '好，换个话题。直接发消息就会开始新的对话，之前的还在这里。', tone: 'success'}
       : undefined;
     return sessionControlPanel(sessions.map(session => ({...session, ...('topic' in session && (session as TopicSession).topic?.link

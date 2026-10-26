@@ -78,7 +78,7 @@ The connection's model check does not create a “飞书连接测试” conversa
 | Use `/permission`, or **设置 → 权限模式** (Settings → Permission mode) in the bottom menu | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking. The card you tap updates in place and turns green when done |
 | Ask for the result file | Sends files from its workspace straight to the chat |
 | Say "lead with the conclusion from now on" | Remembers the preference |
-| Continue inside a topic, or use `/sessions`, `/new` | Keeps each conversation in its own native Feishu topic; search and page through a dropdown to reopen earlier topics, or create a new one |
+| Continue inside a topic, or use `/sessions`, `/new` | Keeps each conversation in its own native Feishu topic; reply beneath a new topic's entry card, or use the searchable, paged dropdown to reopen an earlier topic |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |
 | Ask it to let you pick between options first | Sends a form card and continues once you submit |
 | Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2` / `rc.3`, opening that Feishu session in the app also shows a local preview |
