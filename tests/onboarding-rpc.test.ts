@@ -29,6 +29,30 @@ function fixture(legacy = false) {
 }
 
 describe('owner-only onboarding RPC', () => {
+  it('accepts only a fixed input kind for the selected bot, never arbitrary scope names', async () => {
+    const h = fixture(), id = 'a'.repeat(32);
+    await h.invoke('enable-input', {kind: 'voice', connectionId: id});
+    expect(h.controller.command).toHaveBeenCalledWith('enable-input', {kind: 'voice'}, id);
+    h.controller.command.mockClear();
+    for (const data of [{}, {kind: 'speech_to_text:speech'}, {kind: 'voice', scopes: 'drive:drive'}, {kind: 'voice', appId: 'cli_other'}]) {
+      expect(await h.invoke('enable-input', data)).toMatchObject({ok: false});
+    }
+    expect(await h.invoke('enable-input', {kind: 'voice'}, {principal: {kind: 'guest'}})).toMatchObject({ok: false});
+    expect(h.controller.command).not.toHaveBeenCalled();
+  });
+  it('scopes robot settings by an opaque ID without accepting identities, paths to config, or secrets', async () => {
+    const h = fixture();
+    const id = 'a'.repeat(32);
+    const settings = {label: '研究助手', agentPreset: 'research', workspace: '/tmp/workspace', imageInput: true, voiceInput: false};
+    await h.invoke('update-agent', {...settings, connectionId: id});
+    expect(h.controller.command).toHaveBeenCalledWith('update-agent', settings, id);
+    h.controller.command.mockClear();
+    for (const payload of [{...settings, connectionId: '../escape'}, {...settings, configFile: '/tmp/private'},
+      {...settings, ownerOpenId: 'ou_fake'}, {...settings, appSecret: 'PRIVATE'}, {...settings, voiceInput: 'true'}, {...settings, workspace: '../relative'}]) {
+      expect(await h.invoke('update-agent', payload)).toMatchObject({ok: false});
+    }
+    expect(h.controller.command).not.toHaveBeenCalled();
+  });
   it('requires an owner peer on the modern host, including for read-only state and profile metadata', async () => {
     const h = fixture();
     for (const endpoint of ['status', 'profiles', 'create']) {

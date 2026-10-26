@@ -70,6 +70,7 @@ export function useConnection(api: ConnectionApi) {
       } else {
         const next = await api.snapshot(endpoint, payload, controller.signal);
         if (live.current && generation === epoch.current && !controller.signal.aborted) accept(next);
+        return next;
       }
     } catch (error) {
       if (live.current && generation === epoch.current && !controller.signal.aborted) setError(report(error));

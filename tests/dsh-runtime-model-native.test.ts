@@ -43,6 +43,7 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
         async resolveModel(provider: string, model: string) {
           metadataReads.model++;
           return {provider, id: model, name: model === 'reasoned' ? 'Reasoned model' : 'Plain model',
+            inputModalities: ['text', 'image'],
             ...(model === 'reasoned' ? {reasoning: {efforts: [{id: 'quick', name: 'Quick'}, {id: 'deep', name: 'Deep'}], defaultEffort: 'quick'}} : {})};
         }
         async *stream(request: ModelSelection & {sessionId: string}) {
@@ -61,7 +62,7 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
       let adapter: InstanceType<typeof runtime.DshRuntime>, ownerContext: unknown;
       await mount({inject: ['agents', 'tools', 'sessions', 'sessionPersistence', 'systemPrompt'],
         apply(ctx: unknown) {ownerContext = ctx; adapter = new runtime.DshRuntime(ctx);}});
-      return {root, adapter: adapter!, requests, metadataReads, toolApi: tools, llmApi: llm, promptApi: prompts,
+      return {root, adapter: adapter!, requests, metadataReads, toolApi: tools, llmApi: llm, promptApi: prompts, load, mount,
         async checkConnection() {
           const {checkConnectionModel} = await load('onboarding/model-check.js');
           await checkConnectionModel(ownerContext, {provider: 'offline', model: 'plain'}, new AbortController().signal);
@@ -71,6 +72,35 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
         symbols: cordis.symbols, persistenceApi: await module('dsh-session-persistence'),
         close: () => root.fiber.dispose()};
     }
+
+    it.skipIf(family !== 'legacy')('persists native image input and restores its bytes on the legacy host', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'lark-legacy-image-'));
+      const hosts: Array<Awaited<ReturnType<typeof createHost>>> = [];
+      const policy = {cwd: directory, allowedTools: [], provider: 'offline', model: 'plain', mode: 'harness' as const, memory: privateMemory()};
+      try {
+        const first = await createHost(directory); hosts.push(first);
+        const backend = await first.load('node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js');
+        await first.mount(backend.default, {dshHome: join(directory, 'home')});
+        const metadata = JSON.parse(await readFile(join(hostRoot!, 'node_modules/sharp/package.json'), 'utf8'));
+        const sharp = (await first.load(`node_modules/sharp/${metadata.main}`)).default;
+        const bytes = await sharp({create: {width: 2, height: 2, channels: 4, background: '#3366ff'}}).png().toBuffer();
+        const session = await first.adapter.create(policy);
+        expect(await session.run('describe legacy image', new AbortController().signal, {images: [{data: bytes, mediaType: 'image/png'}]})).toBe('offline answer');
+        const native = first.root.get('agents').get(session.id).session;
+        const events = typeof native.snapshotEvents === 'function' ? native.snapshotEvents() : native.events;
+        const image = events.flatMap((event: {type: string; data: {content?: Array<{type: string; attachment?: unknown}>}}) => event.type === 'user/message' ? event.data.content ?? [] : [])
+          .find((part: {type: string}) => part.type === 'image');
+        expect(image).toBeTruthy();
+        await session.dispose(); await first.close();
+        const second = await createHost(directory); hosts.push(second);
+        await second.mount(backend.default, {dshHome: join(directory, 'home')});
+        const resumed = await second.adapter.resume(policy, session.id);
+        expect(await resumed.run('continue', new AbortController().signal)).toBe('offline answer');
+        expect((await second.root.get('attachments').readImage(image.attachment)).data.byteLength).toBeGreaterThan(0);
+        expect(JSON.stringify(second.requests)).toContain('"type":"image"');
+        await resumed.dispose();
+      } finally {for (const host of hosts.reverse()) await host.close(); await rm(directory, {recursive: true, force: true});}
+    });
 
     it('checks connections without adding test conversations to real native persistence', async () => {
       const directory = await mkdtemp(join(tmpdir(), `lark-model-check-${family}-`)), host = await createHost(directory);

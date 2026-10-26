@@ -24,6 +24,8 @@
 | 扫码、应用配置、模型预检、配对与启停 | `src/onboarding/controller.ts`、`model-check.ts`、`lark-platform.ts`、`pairing.ts`、`store.ts` | `onboarding`、`onboarding-model`、`lark-platform` 测试 |
 | 宿主 RPC、所有者权限、接入状态目录 | `src/onboarding/host.ts`、`protocol.ts` | `onboarding-rpc`、`client-modern-host`、`index` 测试 |
 | 设置页、异步反馈、客户端打包、升级提示 | `src/client/`、`src/onboarding/updates.ts`、`scripts/build-client.mjs` | `client-api`、`client-card`、`update-check` 测试；检查 `./client` 入口及真实宿主加载 |
+| 多机器人、Agent 设置与工作区 | `src/onboarding/manager.ts`、`agents.ts`、`settings-store.ts`、`controller.ts`、`src/client/ManagerPanel.tsx` | `onboarding-manager`、`client-manager`、`onboarding-rpc`、`session-store`；原连接保留原目录，各机器人独立启停 |
+| 图片与语音输入 | `src/message.ts`、`src/media-input.ts`、`src/lark-cli.ts`、`src/bridge.ts`、`src/dsh-runtime.ts` | `media-input`、`lark-cli`、`bridge`、`presentation-flow`、`dsh-runtime`；真实宿主的图片入库与恢复 |
 | 身份、准入、队列、命令 | `src/message.ts`、`src/bridge.ts` | `message`、`bridge`、`rich-bridge` 测试 |
 | 双宿主模型、工具与原生恢复 | `src/dsh-runtime.ts` | `dsh-runtime`、`dsh-runtime-modern`、`persistence-flow` 测试 |
 | 模型选择、思考深度与旧卡片冲突 | `src/model-controls.ts`、`src/model-preferences.ts`、`src/bridge.ts` | `model-controls-bridge`、`model-preferences`、`dsh-runtime-model-native` 测试 |
@@ -45,6 +47,8 @@
 
 - `configFile` / `DSH_LARK_CONFIG` 有值时加载显式团队配置；留空时注册连接设置。两条入口复用 `createBotService`，保持相同准入、持久化和关闭规则。
 - 控制面只允许宿主所有者访问：旧 RPC 保留 loopback 授权，新 RPC 校验 owner principal。UI 只传协议列出的操作字段，不接受任意配置路径、身份或密钥。
+- 多机器人沿用原目录作为 `default`，新增入口只接受服务端生成的 ID。列表修改与命令准入串行；移除前确认该连接已停止，保留资料和 CLI 凭据。入口改绑机器人时先保留新身份，替换记录可靠保存后才释放旧身份；保存结果不确定时保留两者。Agent 与工作区设置在暂停后保存，新会话记录选择，旧 Harness 私聊会话保留原预设和工作区；受限会话继续服从当前管理员配置。App 的一级「飞书 agent」使用公开 `settings.section`，旧 Web 仍用 `settings.plugins.tab`。
+- 设置页按插件内容区宽度响应，不能用整个窗口宽度推断嵌入面板布局。消息输入开关与能力就绪分开：展示宿主附件、模型图片能力、FFmpeg 和飞书权限，未知能力不冒充已验证。图片/语音增补授权只接受固定特性枚举，按已验证机器人的专用 profile 用官方扫码增补固定 bot scopes；回读身份和权限后才标记就绪，取消不停止服务、不重新配对，不自动启用输入。
 - 设置页的升级提示只读 npm 包文档中的 `latest` 标签及其发布时间（只发包名；设置页轮询时最多 6 小时一次，后台进行，不阻塞状态读取，失败不提示），发布满 24 小时才经快照的 `update` 字段送到页面：App 与 `dsh plugin` 的 pnpm 11 默认跳过发布不满一天的版本，提前提示只会装上旧版。插件不自行下载、替换或重装自己：App 内只经公开的 `pluginNavigation.openList()` 打开插件列表，旧 App 与 Web 只给步骤和命令。测试经 `latestRelease` 注入，不访问网络。
 - 绑定来自未过期配对词对应的真实私聊事件，并匹配创建者或经过本机所有者确认。模型连通性检查、连接就绪和飞书确认回复成功后才持久化启用；取消、响应未知、关闭失败时保留可恢复状态。
 - 连接模型预检通过宿主公开的 `llm.stream()` 发送固定测试消息，成功、失败、取消和超时均不创建或保留测试会话。仅验证模型，不读取用户内容或调用工具。
@@ -70,6 +74,7 @@
 - 受限模式（群聊、团队配置的默认私聊）保留独立 complete persona、动态上下文抑制、native tools、`restrict` 与单向 `guard`，以及宿主审批拒绝；不能把 Harness 模式、思考过程、实时卡片或确认卡片扩展到群聊。工作目录不是文件系统沙箱；额外工具必须自身实施资源权限。
 - CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。实时卡片只有首次回复算发送：卡片实体创建失败才改用普通回复（之后 10 分钟不再尝试）；回复结果未知时继续更新卡片、不另发消息。对同一卡片实体的更新幂等，可用更高的 sequence 重试。一次回复只用一张卡片：思考过程与工具步骤默认折叠、按 App 的步骤名逐行显示，终稿优先放回答，过程用全部剩余空间，超出卡片上限时从最早的步骤省略并注明，不另发消息；工具详情和面板标题只用纯文本或转义后的内容。
 - Harness 交付的文件只在 realpath 位于该用户工作区内、是非空普通文件且不超过 30 MB 时上传，CLI 只收到以文件所在目录为 cwd 的 `./basename`；其余只告知电脑上的位置，上传结果未知时不重发。
+- 入站图片与语音仅本人 Harness 私聊可用，先鉴权并持久化消息 claim，再在所属队列下载原消息的资源键。图片交给宿主 `attachments.saveImages` 后才追加原生输入；语音经固定 FFmpeg 参数转成有界 PCM，再用专用 bot profile 调用飞书 ASR。转写作为普通输入，不触发命令；附件准备须保留表单提交等已整理的正文。临时文件在子进程退出后清理，原生图片保留跟随宿主。
 - 状态锁保护目录，全局机器人租约按 bot 身份跨 home / profile 保护接收实例；配对监听也取得同一租约。关闭时排空处理、原生持久化及进度清理，成功后才释放锁。关闭失败保留服务所有权和租约；持锁进程仍在或无法确认已退出时，禁止接管或删锁。只有确认原持锁进程已退出（PID 不存在、PID 已属于另一进程，或无法核对身份的锁早于本次开机），且机器人租约经专用 profile 的 CLI 确认没有活跃 consumer 时，才原子接管遗留锁；不按锁的年龄猜测，锁目录须在本机磁盘。
 - 原生会话释放与该会话队列串行；释放失败保留 handle 和 lane，确认关闭前不能打开同一原生日志。闲置回收也遵守此规则。
 - 结构化展示只接受受限数据，经当前原生回合 checkpoint 后保存不可变作品；模型不能指定文件路径、卡片 JSON、收件人或权限。表单依据保存的 schema 校验，按原用户／聊天／逻辑话题绑定，提交一次后不可重放。

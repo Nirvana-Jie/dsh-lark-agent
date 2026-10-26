@@ -61,7 +61,7 @@ When a new version has been out for a day, the Feishu settings page shows a noti
 
 Button labels are quoted in Chinese, as they appear, with an English gloss.
 
-1. Open the Feishu settings page — desktop app: **设置 → 内置插件 → 飞书** (Settings → Built-in plugins → Feishu); web: **设置 → 插件 → 飞书** (Settings → Plugins → Feishu) — and click **扫码创建并连接** (scan to create and connect).
+1. Open **设置 → 飞书 agent** (Settings → Feishu agent) in the desktop app, or **设置 → 插件 → 飞书 agent** on the web. Choose a robot and click **扫码创建并连接** (scan to create and connect). Use **添加机器人** (add robot) for another Agent; each robot has its own preset and workspace settings.
 2. Scan the QR code with your own Feishu account and approve. If your organization requires admin approval, click **重新检查** (check again) once it is approved.
 3. Click **打开飞书私聊** (open private chat) and, from the account that scanned, send the pairing word (`DSH-…`, valid for 10 minutes) as a plain-text message on its own, exactly as shown. If asked, confirm with **这是我，完成连接** (this is me).
 4. When the page shows **已连接** (connected), send the bot a message.
@@ -73,6 +73,9 @@ The connection's model check does not create a “飞书连接测试” conversa
 | In Feishu, you… | The assistant… |
 | --- | --- |
 | Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card; its thinking and tool steps are folded inside, step by step as in the app, and the card ends with the model, thinking depth and permission mode it used |
+| Use several assistants | Manages up to 10 Feishu robots from one page, each with its own Agent preset, workspace, connection and history; pause a robot to edit its settings. Preset selection is available when the host provides it |
+| Send images in your private Harness chat | Reads PNG, JPEG, WebP or GIF through the host's durable attachments, when the selected model supports images; up to 4 images, 10 MB each |
+| Send a voice message | Use **开通语音权限** (authorize voice) for that robot, then pause, enable and save voice input. Transcribes up to 60 seconds of Chinese / English speech and replies in text; requires FFmpeg and a tenant plan that supports ASR |
 | Ask for something that needs your OK | Sends a confirmation card: tap **允许一次** (allow once) or **拒绝** (deny); no answer within 5 minutes means it won't run |
 | Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
 | Use `/permission`, or **设置 → 权限模式** (Settings → Permission mode) in the bottom menu | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking. The card you tap updates in place and turns green when done |

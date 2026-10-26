@@ -24,6 +24,7 @@ import type {ArtifactStore, ArtifactContext, SavedArtifact} from './artifacts.js
 import type {ArtifactPublisher} from './artifact-publisher.js';
 import {TopicStoreError, type TopicStore, type TopicBinding, type TopicScope, type TopicReceipt} from './topic-store.js';
 import {sessionControlPanel, sessionPage, sessionQuery, sessionViewCommandParse, type SessionView} from './session-controls.js';
+import {MediaInputError, prepareMedia, type MediaTransport} from './media-input.js';
 
 export interface Runtime {
   create(policy: AgentPolicy): Promise<RuntimeSession>;
@@ -47,7 +48,7 @@ export interface BotState {
   permissionPreferences?: Pick<PermissionPreferencesStore, 'get' | 'set'>;
   topics?: Pick<TopicStore, 'get' | 'list' | 'record' | 'occupied'>;
 }
-export interface Transport {
+export interface Transport extends MediaTransport {
   reply(messageId: string, text: string, options: {idempotencyKey: string; inThread: boolean}): Promise<void>;
   replyRich?(messageId: string, payload: ReplyPayload, options: {idempotencyKey: string; inThread: boolean}): Promise<void>;
   sendUser?(openId: string, text: string, options: {idempotencyKey: string}): Promise<void>;
@@ -158,11 +159,13 @@ const HELP = `直接把想做的事告诉我就好。
 比如：帮我理清一个问题、整理一段文字，或者接着刚才的话题继续。你也可以在私聊告诉我，以后希望我怎样配合你。
 
 私聊底部菜单可以新建话题、搜索和选择历史对话，或调整模型和思考深度。
+多个机器人与 Agent 可在电脑的「飞书 agent」设置中分别管理。
 私聊和群聊的新问题都会开一个飞书话题；新话题卡片下方点「回复话题」继续，群聊中仍需 @我。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
 const HARNESS_HELP = `
 
-这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或点底部菜单 设置 → 权限模式）可以切换权限，比如改成不再询问的「完全权限」。模型、思考深度和权限模式与电脑上的 Harness 同步。`;
+这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或点底部菜单 设置 → 权限模式）可以切换权限，比如改成不再询问的「完全权限」。模型、思考深度和权限模式与电脑上的 Harness 同步。
+可直接发图片（需要宿主与模型支持图片输入）；在电脑设置中启用语音后，可发送 60 秒以内语音，识别成文字继续对话。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：创建新的飞书话题，在新话题里开始；旧话题和长期记忆保留
 /sessions：搜索、翻页并选择以前的对话；/sessions detail 查看 ID，/sessions page <页码> 查看其他页
@@ -356,8 +359,8 @@ export class BotBridge {
         message.foreignTopic = !message.topic && await this.state.topics!.occupied(this.topicScope(message).chatKey, message.threadId);
       }
       // Recognized settings questions use the entry lane before any provisional topic context is allocated.
-      if (this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
-      const startsTopic = this.topicsEnabled() && !message.threadId && !message.text.startsWith('/');
+      if (!message.resources?.length && this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
+      const startsTopic = this.topicsEnabled() && !message.threadId && (!message.text.startsWith('/') || Boolean(message.resources?.length));
       const key = message.topic?.laneKey ?? (startsTopic ? this.newTopicKey(message) : sessionKey(message, this.config));
       if (startsTopic) message.conversationKey = key;
       message.laneKey = key;
@@ -440,6 +443,9 @@ export class BotBridge {
       message.conversationKey = this.entryKey(message);
     }
     let text = message.text;
+    if (message.resources?.length && (message.chatType !== 'p2p' || lane.user.directMode !== 'harness')) {
+      return this.reply(message, '图片和语音输入仅用于已验证本人的 Harness 私聊，请改发文字。');
+    }
     const inPlace = this.inPlace(message);
     // A stale card is redrawn with the current state instead of answered with another message.
     if (message.expectedSessionId !== undefined) {
@@ -481,7 +487,7 @@ export class BotBridge {
         }
       } catch (error) {if (error instanceof ArtifactDeliveryError) throw error; return this.reply(message, error instanceof PresentationError ? error.message : '作品暂时无法读取，已有内容会保留。');}
     }
-    if (text.startsWith('/')) {
+    if (text.startsWith('/') && !message.resources?.length) {
       if (inPlace) return this.panelInPlace(message, lane);
       const feedback = this.topicsEnabled() && /^\/(?:new|reset|clear|resume)(?:\s|$)/i.test(text)
         ? undefined : this.commandFeedback(message);
@@ -539,6 +545,9 @@ export class BotBridge {
       if (!await card.finish(final)) this.audit({stage: 'live-card-unconfirmed', messageId: message.messageId});
     };
     try {
+      const input = await prepareMedia({...message, text}, this.transport, controller.signal,
+        {images: this.config.imageInput !== false, voice: this.config.voiceInput === true, maxText: this.config.maxInputChars});
+      text = input.text;
       await this.ensureSession(message, lane);
       if (controller.signal.aborted) {
         if (timedOut) await this.reply(message, TIMEOUT_TEXT);
@@ -558,7 +567,7 @@ export class BotBridge {
           void this.settingsLine(lane).then(line => { if (line) candidate.setFooter(line); }, () => undefined);
         } else this.liveUnavailableUntil = Date.now() + LIVE_RETRY_MS;
       }
-      const turnContext = {memoryText, ...(artifactsText ? {artifactsText} : {})};
+      const turnContext = {memoryText, ...(artifactsText ? {artifactsText} : {}), ...(input.images ? {images: input.images} : {})};
       // Only the owner's harness-mode chat can be asked anything; a restricted session gets no hooks at all.
       const observer: TurnObserver | undefined = live || harness ? {
         ...(live ? {stream: (event: TurnStreamEvent) => live?.push(event)} : {}),
@@ -592,7 +601,7 @@ export class BotBridge {
     } catch (error) {
       clearTimeout(timer);
       if (error instanceof ArtifactDeliveryError) throw error;
-      const known = error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError || error instanceof PresentationError;
+      const known = error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError || error instanceof PresentationError || error instanceof MediaInputError;
       if (live) {
         const stopped = timedOut || controller.signal.aborted || this.stopped;
         await conclude({phase: stopped ? 'stopped' : 'failed', note: timedOut ? TIMEOUT_TEXT : this.stopped ? STOPPING_TEXT
@@ -747,7 +756,7 @@ export class BotBridge {
   /** Send files the host's delivery tool presented, from this user's workspace only. */
   private async deliverFiles(message: RoutedMessage, lane: Lane, files: readonly DeliveredFile[], signal: AbortSignal): Promise<void> {
     if (!files.length || signal.aborted || this.stopped) return;
-    const workspace = await realpath(lane.user.cwd).catch(() => undefined);
+    const workspace = await realpath(lane.saved?.cwd ?? lane.user.cwd).catch(() => undefined);
     const notes: string[] = [];
     for (const [index, file] of files.entries()) {
       if (signal.aborted || this.stopped) return;
@@ -986,11 +995,13 @@ export class BotBridge {
       : `已准备好「${title}」。请在聊天记录中打开对应话题继续。`;
   }
 
-  private policy(message: IncomingMessage, lane: Lane, selection?: ModelSelection): AgentPolicy {
+  private policy(message: IncomingMessage, lane: Lane, selection?: ModelSelection, cwd?: string): AgentPolicy {
     const context = this.context(message);
+    const harness = message.chatType === 'p2p' && lane.user.directMode === 'harness';
     return {
-      cwd: lane.user.cwd, allowedTools: lane.user.allowedTools,
-      mode: message.chatType === 'p2p' && lane.user.directMode === 'harness' ? 'harness' : 'restricted',
+      cwd: harness && cwd ? cwd : lane.user.cwd, allowedTools: lane.user.allowedTools,
+      mode: harness ? 'harness' : 'restricted',
+      ...(harness && lane.user.agentPreset ? {agentPreset: lane.user.agentPreset} : {}),
       provider: this.config.provider, model: this.config.model,
       presentation: Boolean(this.state.artifacts),
       ...selection,
@@ -1032,7 +1043,7 @@ export class BotBridge {
     // Like the App: a shared session starts on the host default and resumes on its own record.
     const selection = this.sharedModel(message, lane) ? undefined : modelPreference?.selection;
     const handle = saved
-      ? await this.runtime.resume(this.policy(message, lane, selection), saved.nativeId)
+      ? await this.runtime.resume(this.policy(message, lane, selection, saved.cwd), saved.nativeId)
       : await this.runtime.create(this.policy(message, lane, selection));
     try {
       await handle.checkpoint();
@@ -1041,7 +1052,7 @@ export class BotBridge {
       // Publish a route only after even the empty native log is durable, and
       // before submitting the first prompt. An abandoned creation has no work.
       lane.saved = saved ? await this.bindRestoredSession(context, saved, handle)
-        : await this.state.sessions.add(context, handle.id, preview(message.text, 40) || '新会话');
+        : await this.state.sessions.add(context, handle.id, preview(message.text, 40) || '新会话', lane.user.cwd);
       if (message.topic && !message.topic.sessionId) {
         message.topic = await this.state.topics!.record({...message.topic, sessionId: lane.saved.id});
       }
@@ -1149,7 +1160,7 @@ export class BotBridge {
       if (!lane.unavailable && lane.session && lane.saved?.id === target.id) return `已经在会话「${target.title}」中。`;
       await this.unload(lane);
       const preference = await this.state.modelPreferences?.get(context);
-      const handle = await this.runtime.resume(this.policy(message, lane, this.sharedModel(message, lane) ? undefined : preference?.selection), target.nativeId);
+      const handle = await this.runtime.resume(this.policy(message, lane, this.sharedModel(message, lane) ? undefined : preference?.selection, target.cwd), target.nativeId);
       try {
         await handle.checkpoint();
         await this.applyPermission(message, lane, handle, false);

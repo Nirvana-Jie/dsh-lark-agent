@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BotBridge } from '../src/bridge.js';
 import { parseConfig, type BotConfig } from '../src/config.js';
 import { DshRuntimeError, type AgentPolicy, type RuntimeSession } from '../src/dsh-runtime.js';
-import type { BotState } from '../src/bridge.js';
+import type { BotState, Transport } from '../src/bridge.js';
 import type { SavedSession, SessionContext } from '../src/session-store.js';
 
 function deferred<T = string>() {
@@ -43,8 +43,8 @@ function harness(overrides: Partial<BotConfig> = {}, run?: (text: string, signal
     sessions: {
       current: async c => (saved.get(key(c)) ?? []).find(s => s.id === active.get(key(c))),
       list: async c => saved.get(key(c)) ?? [],
-      add: async (c, nativeId, title) => {
-        const record = {id: String(saved.size + 1).padStart(12, '0'), nativeId, title: title ?? '新会话', createdAt: Date.now(), updatedAt: Date.now()};
+      add: async (c, nativeId, title, cwd) => {
+        const record = {id: String(saved.size + 1).padStart(12, '0'), nativeId, title: title ?? '新会话', createdAt: Date.now(), updatedAt: Date.now(), ...(cwd ? {cwd} : {})};
         saved.set(key(c), [...(saved.get(key(c)) ?? []), record]); active.set(key(c), record.id); return record;
       },
       archive: async c => { active.delete(key(c)); },
@@ -69,7 +69,8 @@ function harness(overrides: Partial<BotConfig> = {}, run?: (text: string, signal
     session.id = id;
     return session;
   });
-  const bridge = new BotBridge(config, {create, resume}, {reply: replies}, {claim}, state, audit);
+  const transport: Transport = {reply: replies};
+  const bridge = new BotBridge(config, {create, resume}, transport, {claim}, state, audit);
   let sequence = 0;
   const event = (content: string, extra: Record<string, unknown> = {}) => ({
     type: 'im.message.receive_v1', sender_type: 'user', sender_id: 'ou_alice', message_type: 'text',
@@ -78,10 +79,49 @@ function harness(overrides: Partial<BotConfig> = {}, run?: (text: string, signal
   const group = (content: string, extra: Record<string, unknown> = {}) => event(`@_user_1 ${content}`, {
     chat_type: 'group', chat_id: 'oc_group', mentions: [{key: '@_user_1', id: 'ou_bot', name: 'DSH'}], ...extra,
   });
-  return {bridge, create, sessions, replies, claim, audit, event, group, config};
+  return {bridge, create, sessions, replies, claim, audit, event, group, config, transport};
 }
 
 afterEach(() => { vi.useRealTimers(); });
+
+describe('media ingress authorization and deduplication', () => {
+  it.each(['harness', 'restricted'] as const)('restores workspace choices within the %s policy boundary', async mode => {
+    const h = harness(); h.config.users[0]!.directMode = mode;
+    await h.bridge.accept(h.event('first'));
+    await h.bridge.accept(h.event('/new'));
+    h.config.users[0]!.cwd = '/tmp/alice-new';
+    await h.bridge.accept(h.event('/resume 000000000001'));
+    expect(h.create.mock.calls.at(-1)![0].cwd).toBe(mode === 'harness' ? '/tmp/alice' : '/tmp/alice-new');
+    await h.bridge.stop();
+  });
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z3GAAAAAASUVORK5CYII=', 'base64');
+  it('downloads an authorized image only after the durable claim, and never repeats a replay', async () => {
+    const h = harness(); h.config.users[0]!.directMode = 'harness';
+    const read = vi.fn(async () => png); h.transport.readResource = read;
+    const event = h.event('[Image: img_fixture]', {message_type: 'image'});
+    await h.bridge.accept(event); await h.bridge.accept(event);
+    expect(read).toHaveBeenCalledOnce();
+    expect(h.claim.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder[0]!);
+    expect(h.sessions[0]!.run).toHaveBeenCalledWith(expect.any(String), expect.any(AbortSignal), expect.objectContaining({images: [{data: png, mediaType: 'image/png'}]}), expect.anything());
+    await h.bridge.stop();
+  });
+  it('does not fetch attachments from unknown senders, groups or restricted sessions', async () => {
+    const h = harness(), read = vi.fn(async () => png); h.transport.readResource = read;
+    await h.bridge.accept(h.event('[Image: img_fixture]', {message_type: 'image', sender_id: 'ou_stranger'}));
+    await h.bridge.accept(h.event('[Image: img_fixture]', {message_type: 'image'}));
+    await h.bridge.accept(h.group('![Image](img_fixture)', {message_type: 'post'}));
+    expect(read).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
+    expect(h.replies).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('本人'), expect.anything());
+    await h.bridge.stop();
+  });
+  it('retains an image caption resembling a command as ordinary model input', async () => {
+    const h = harness(); h.config.users[0]!.directMode = 'harness'; h.transport.readResource = async () => png;
+    await h.bridge.accept(h.event('/new\n![Image](img_fixture)', {message_type: 'post'}));
+    expect(h.sessions[0]!.run.mock.calls[0]![0]).toBe('/new');
+    expect(h.replies.mock.calls[0]?.[1]).toContain('answer:');
+    await h.bridge.stop();
+  });
+});
 
 describe('BotBridge execution and identity boundaries', () => {
   it('serializes one user lane and reuses its session', async () => {

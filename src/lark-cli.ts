@@ -1,10 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute } from 'node:path';
+import {basename, dirname, isAbsolute, join} from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import {renderPanel, type ReplyPayload} from './replies.js';
 import {topicLink, type TopicReceipt} from './topic-store.js';
 import {topicEntryPanel} from './topic-cards.js';
+import {mkdtemp, lstat, readFile, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import type {IncomingResource} from './message.js';
+import {MAX_INPUT_AUDIO_BYTES, MAX_INPUT_IMAGE_BYTES} from './media-input.js';
 
 export type LarkEventKey = 'im.message.receive_v1' | 'card.action.trigger' | 'application.bot.menu_v6';
 
@@ -149,6 +153,82 @@ export class LarkCli {
       windowsHide: true,
       stdio: 'pipe',
       ...(cwd ? {cwd} : {}),
+    });
+  }
+
+  /** Downloads only the resource attached to the admitted real message, into a private temporary directory. */
+  async readResource(resource: IncomingResource, signal: AbortSignal): Promise<Uint8Array> {
+    if (!/^om_[A-Za-z0-9_-]{1,200}$/.test(resource.messageId)
+      || !new RegExp(`^${resource.kind === 'image' ? 'img' : 'file'}_[A-Za-z0-9_-]{1,200}$`).test(resource.key)) throw new Error('Invalid message resource');
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-lark-input-'));
+    const path = join(directory, 'resource.bin');
+    const limit = resource.kind === 'image' ? MAX_INPUT_IMAGE_BYTES : MAX_INPUT_AUDIO_BYTES;
+    const aborter = new AbortController();
+    const combined = AbortSignal.any([signal, aborter.signal]);
+    // Abort growing downloads; the final read independently enforces the input cap.
+    const monitor = setInterval(() => {void lstat(path).then(info => {
+      if (info.isSymbolicLink() || !info.isFile() || info.size > limit) aborter.abort();
+    }).catch(() => undefined);}, 25);
+    try {
+      await this.executeMedia(['im', '+messages-resources-download', '--message-id', resource.messageId, '--file-key', resource.key,
+        '--type', resource.kind === 'image' ? 'image' : 'file', '--output', './resource.bin', '--as', 'bot', '--format', 'json'], '', combined, directory);
+      signal.throwIfAborted();
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > limit) throw new Error('Message resource exceeds its input limit');
+      const bytes = await readFile(path);
+      if (bytes.length > limit || bytes.length !== info.size) throw new Error('Message resource changed while reading');
+      return bytes;
+    } finally {clearInterval(monitor); await rm(directory, {recursive: true, force: true});}
+  }
+
+  /** Feishu's tenant ASR, using the same dedicated bot profile and credentials. */
+  async recognizeSpeech(pcm: Uint8Array, signal: AbortSignal): Promise<string> {
+    if (!pcm.byteLength || pcm.byteLength > 60 * 16000 * 2) throw new Error('Invalid speech input');
+    const result = await this.executeMedia(['api', 'POST', '/open-apis/speech_to_text/v1/speech/file_recognize', '--as', 'bot', '--data', '-', '--format', 'json'],
+      JSON.stringify({config: {file_id: randomUUID().replaceAll('-', '').slice(0, 16), format: 'pcm', engine_type: '16k_auto'},
+        speech: {speech: Buffer.from(pcm).toString('base64')}}), signal);
+    const data = result.data as {recognition_text?: unknown} | undefined;
+    if (typeof data?.recognition_text !== 'string' || !data.recognition_text.trim() || data.recognition_text.length > 100_000) throw new Error('Speech result is unavailable');
+    return data.recognition_text;
+  }
+
+  /** Media reads drain the child before cleanup, including cancellation and forced termination. */
+  private executeMedia(args: string[], input: string, signal: AbortSignal, cwd?: string): Promise<Record<string, unknown>> {
+    if (this.stopped) return Promise.reject(new Error('Lark transport is stopped'));
+    return new Promise((resolve, reject) => {
+      signal.throwIfAborted();
+      const child = this.launch(args, cwd);
+      const chunks: Buffer[] = [];
+      let failure: Error | undefined, size = 0;
+      let kill: ReturnType<typeof setTimeout> | undefined;
+      const cancel = () => {
+        failure ??= new Error('Lark media operation was stopped');
+        child.kill('SIGTERM'); kill ??= setTimeout(() => child.kill('SIGKILL'), 1000);
+      };
+      let resolveClosed!: () => void;
+      const closed = new Promise<void>(done => {resolveClosed = done;});
+      this.replies.set(child, {cancel, closed});
+      const timer = setTimeout(cancel, this.commandTimeoutMs);
+      signal.addEventListener('abort', cancel, {once: true});
+      child.stdout.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MAX_OUTPUT_BYTES) {cancel(); return;}
+        if (!failure) chunks.push(Buffer.from(chunk));
+      });
+      child.stderr.on('data', (chunk: Buffer) => {size += chunk.length; if (size > MAX_OUTPUT_BYTES) cancel();});
+      child.stdin.on('error', cancel);
+      child.on('error', () => {failure = new Error('Lark media command is unavailable');});
+      child.on('close', code => {
+        clearTimeout(timer); clearTimeout(kill); signal.removeEventListener('abort', cancel);
+        this.replies.delete(child); resolveClosed();
+        if (failure || code !== 0) {reject(failure ?? new Error('Lark media command failed')); return;}
+        try {
+          const value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+          if (value?.ok !== true) throw new Error();
+          resolve(value);
+        } catch {reject(new Error('Lark media command did not confirm success'));}
+      });
+      child.stdin.end(input);
     });
   }
 

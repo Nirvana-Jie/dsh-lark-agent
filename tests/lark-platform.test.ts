@@ -6,6 +6,7 @@ import { BOT_SCOPES, SETUP_SCOPES, CONFIGURE_SCOPE, CARD_SCOPE, LarkPlatform, La
   commandRunner, type AppRegistrar, type PlatformRunner, type RegisteredApp } from '../src/onboarding/lark-platform.js';
 import {BOT_MENU_EVENT} from '../src/bot-menu.js';
 import {DOCUMENT_SCOPES, STREAMING_SCOPE} from '../src/rich-scopes.js';
+import {MEDIA_RESOURCE_SCOPE, SPEECH_SCOPE} from '../src/media-scopes.js';
 
 vi.mock('node:child_process', () => ({spawn: vi.fn()}));
 
@@ -59,6 +60,30 @@ function platformFixture(options: {
 }
 
 describe('Lark onboarding platform registration and profiles', () => {
+  it.each(['images', 'voice'] as const)('authorizes only the fixed %s scopes for the selected bot and verifies read-back', async kind => {
+    const f = platformFixture(), original = f.run.getMockImplementation()!;
+    const scopes = kind === 'voice' ? [MEDIA_RESOURCE_SCOPE, SPEECH_SCOPE] : [MEDIA_RESOURCE_SCOPE];
+    let upgraded = false;
+    // Start without image resource permission, including for the image-only flow.
+    f.run.mockImplementation(async (args, options) => args[4] === '/open-apis/application/v6/scopes'
+      ? ok({scopes: (upgraded ? [...BOT_SCOPES, ...scopes] : [...BOT_SCOPES]).map(scope_name => ({scope_name, grant_status: 1}))}) : original(args, options));
+    const registerApp = vi.fn<AppRegistrar>(async options => {
+      options.onQRCodeReady({url: 'https://accounts.feishu.cn/verify?opaque=fixture', expireIn: 600}); upgraded = true;
+      return {client_id: 'cli_test', client_secret: 'must-never-be-returned'};
+    });
+    const platform = new LarkPlatform({run: f.run, registerApp}), qr = vi.fn(), signal = new AbortController().signal;
+    await platform.enableInput(profile.name, kind, qr, signal, profile.appId);
+    expect(registerApp.mock.calls[0]?.[0]).toMatchObject({appId: 'cli_test', addons: {preset: false, scopes: {tenant: scopes}}});
+    expect(registerApp.mock.calls[0]?.[0].addons?.scopes?.user).toBeUndefined();
+    expect(f.run.mock.calls.some(([args]) => args[0] === 'config')).toBe(false);
+    await platform.enableInput(profile.name, kind, qr, signal, profile.appId);
+    expect(registerApp).toHaveBeenCalledOnce(); expect(qr).toHaveBeenCalledOnce();
+    upgraded = false; registerApp.mockResolvedValue({client_id: 'cli_test', client_secret: 'private'});
+    await expect(platform.enableInput(profile.name, kind, qr, signal, profile.appId)).rejects.toMatchObject({code: 'MISSING_SCOPE'});
+    registerApp.mockClear();
+    await expect(platform.enableInput(profile.name, kind, qr, signal, 'cli_another')).rejects.toMatchObject({code: 'APP_MISMATCH'});
+    expect(registerApp).not.toHaveBeenCalled();
+  });
   it('adds bot document scopes to the exact existing app, without storing or returning the new credential', async () => {
     const f = platformFixture();
     const original = f.run.getMockImplementation()!;

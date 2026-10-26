@@ -6,16 +6,19 @@ import {parseConfig, type BotConfig} from '../config.js';
 import {BotServiceStartError, type BotService} from '../bot-service.js';
 import type {IncomingMessage} from '../message.js';
 import {LarkCli} from '../lark-cli.js';
-import {LockHeldError} from '../lock.js';
+import {acquireLock, LockHeldError} from '../lock.js';
 import {BOT_SCOPES, CARD_SCOPE, LarkPlatform, LarkPlatformError, type Inspection} from './lark-platform.js';
 import {ConnectionStore, type ConnectionRecord} from './store.js';
 import {createChallenge, PairingError, waitForPairing} from './pairing.js';
-import type {ConnectionEndpoint, ConnectionProfile, ConnectionSnapshot} from './protocol.js';
+import type {AgentSettings, ConnectionEndpoint, ConnectionProfile, ConnectionSnapshot} from './protocol.js';
 import {defaultScopesReady} from '../rich-scopes.js';
 import {missingBotMenuEntries, type BotMenuEntry} from '../bot-menu.js';
+import {agentSettingsStore, defaultAgentSettings, parseAgentSettings} from './agents.js';
+import {SessionStore} from '../session-store.js';
+import {MEDIA_RESOURCE_SCOPE, mediaScopes, type MediaInputKind} from '../media-scopes.js';
 
 export interface OnboardingDependencies {
-  platform: Pick<LarkPlatform, 'listProfiles' | 'registerNew' | 'saveNewProfile' | 'inspect' | 'configureAndPublish'> & Partial<Pick<LarkPlatform, 'enableDocuments'>>;
+  platform: Pick<LarkPlatform, 'listProfiles' | 'registerNew' | 'saveNewProfile' | 'inspect' | 'configureAndPublish'> & Partial<Pick<LarkPlatform, 'enableDocuments' | 'enableInput'>>;
   store: ConnectionStore;
   checkRuntime(): void;
   start(config: BotConfig, signal: AbortSignal, onHealth: (ready: boolean) => void, pairedChat?: {openId: string; chatId: string}): Promise<BotService>;
@@ -26,6 +29,10 @@ export interface OnboardingDependencies {
   executable?: string;
   /** Delay before automatic restore attempt `attempt` (0-based) of an enabled connection. */
   retryDelay?: (attempt: number) => number;
+  validateAgent?: (settings: AgentSettings) => Promise<AgentSettings>;
+  reserveApp?: (appId: string) => void;
+  /** Release former reservations only after the replacement record is durable. */
+  commitApp?: (appId: string) => void;
 }
 
 const restoreDelay = (attempt: number) => Math.min(10 * 60_000, 5_000 * 2 ** Math.min(attempt, 10));
@@ -83,24 +90,33 @@ export class ConnectionController {
   private unsafeStop = false;
   private menuReady = false;
   private documentsReady = false;
+  private imagesReady = false;
+  private voiceReady = false;
   /** Menu entries the published app lacks; the owner adds them in the developer console. */
   private menuMissing: BotMenuEntry[] = [];
   private documentSetup?: ConnectionSnapshot['documentSetup'];
   private documentJob?: Promise<void>;
+  private inputSetup?: ConnectionSnapshot['inputSetup'];
   private documentAborter?: AbortController;
   private candidate?: {id: string; message: IncomingMessage; expiresAt: number};
   private commands: Promise<unknown> = Promise.resolve();
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryAttempts = 0;
-  constructor(private readonly deps: OnboardingDependencies) {}
+  private settings: AgentSettings = {...defaultAgentSettings};
+  private readonly settingsStore;
+  private settingsFailed = false;
+  constructor(private readonly deps: OnboardingDependencies) {this.settingsStore = agentSettingsStore(deps.store.directory);}
 
   snapshot(): ConnectionSnapshot {return structuredClone({...this.state,
-    capabilities: {...this.state.capabilities, documents: this.documentsReady}, ...(this.documentSetup ? {documentSetup: this.documentSetup} : {}),
+    agent: {...this.settings, workspaceDisplay: this.settings.workspace || this.defaultWorkspace() || '连接后自动创建独立工作区',
+      editable: !this.closed && !this.service && !this.job && !this.documentJob && !this.record?.enabled && !this.unsafeStop && !this.settingsFailed},
+    capabilities: {...this.state.capabilities, documents: this.documentsReady, images: this.imagesReady, voice: this.voiceReady}, ...(this.documentSetup ? {documentSetup: this.documentSetup} : {}),
+    ...(this.inputSetup ? {inputSetup: this.inputSetup} : {}),
     ...(this.record && this.menuMissing.length ? {menu: {missing: this.menuMissing, url: this.consoleUrl()}} : {})});}
   private phase(phase: ConnectionSnapshot['phase'], message: string = messages[phase]): void {
     this.state = {phase, message, busy: ['creating', 'configuring', 'starting'].includes(phase),
       capabilities: {cards: this.record?.cards ?? true, loading: this.record?.loading ?? true},
-      ...(this.record ? {bot: {name: '我的 dsh 助手', appId: this.record.appId,
+      ...(this.record ? {bot: {name: this.settings.label || '我的 dsh 助手', appId: this.record.appId,
         url: `https://applink.${this.record.brand === 'lark' ? 'larksuite.com' : 'feishu.cn'}/client/bot/open?appId=${this.record.appId}`}} : {})};
   }
   private action(message: string = messages.action_required): void {
@@ -110,8 +126,18 @@ export class ConnectionController {
   private consoleUrl(): string {
     return `https://open.${this.record?.brand === 'lark' ? 'larksuite.com' : 'feishu.cn'}/app/${this.record!.appId}`;
   }
+  private inspectCapabilities(inspection: Inspection): void {
+    this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
+    this.imagesReady = inspection.scopeStatus === 'verified' && inspection.grantedScopes.includes(MEDIA_RESOURCE_SCOPE);
+    this.voiceReady = inspection.scopeStatus === 'verified' && mediaScopes('voice').every(scope => inspection.grantedScopes.includes(scope));
+    this.menuMissing = missingBotMenuEntries(inspection.menuEventKeys ?? []);
+  }
   private assertCurrent(signal: AbortSignal): void {signal.throwIfAborted(); if (this.closed) throw new SetupError('连接设置已关闭。');}
-  private async save(record: ConnectionRecord): Promise<void> {await this.deps.store.write(record); this.record = record;}
+  private async save(record: ConnectionRecord): Promise<void> {
+    await this.deps.store.write(record);
+    this.record = record;
+    this.deps.commitApp?.(record.appId);
+  }
   private launch(work: (signal: AbortSignal) => Promise<void>): void {
     this.clearRetry();
     const generation = ++this.generation;
@@ -151,8 +177,10 @@ export class ConnectionController {
   }
   private clearRetry(): void {clearTimeout(this.retryTimer); this.retryTimer = undefined;}
   async initialize(): Promise<void> {
+    this.settings = await this.settingsStore.read() ?? {...defaultAgentSettings};
     this.record = await this.deps.store.read(); // Corrupt durable state fails closed.
     if (!this.record) return;
+    this.deps.reserveApp?.(this.record.appId);
     if (this.record.enabled && this.record.ownerOpenId) {
       this.phase('configuring'); this.launch(signal => this.check(signal, false));
     } else if (this.record.ownerOpenId && this.record.verified) {
@@ -163,8 +191,7 @@ export class ConnectionController {
       this.documentJob = this.deps.platform.inspect(record.profile, aborter.signal).then(inspection => {
         if (!aborter.signal.aborted && !this.closed && this.record?.appId === record.appId) {
           if (inspection.appId === record.appId && (!record.botOpenId || inspection.botOpenId === record.botOpenId)) {
-            this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
-            this.menuMissing = missingBotMenuEntries(inspection.menuEventKeys ?? []);
+            this.inspectCapabilities(inspection);
           }
         }
       }).catch(() => { /* A metadata outage must not turn an intentional pause into a failed connection. */ })
@@ -180,13 +207,67 @@ export class ConnectionController {
   async command(endpoint: Exclude<ConnectionEndpoint, 'profiles' | 'status'>, payload: unknown): Promise<ConnectionSnapshot> {
     const result = this.commands.then(async () => {
       if (this.closed) throw new SetupError('连接设置已关闭。');
+      if (this.settingsFailed) throw new SetupError('Agent 设置保存结果未能确认，请重启宿主后重新读取。');
       if (this.unsafeStop) throw new SetupError('连接未能安全停止，请检查并关闭原实例。为防止重复处理，当前连接锁已保留。');
       const data = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
-      if (endpoint === 'cancel-documents') {await this.cancelDocuments(); return this.snapshot();}
+      if (endpoint === 'update-agent') {
+        if (this.service || this.job || this.documentJob || this.record?.enabled) throw new SetupError('请先暂停这个机器人的连接，再修改 Agent 设置。');
+        let next: AgentSettings;
+        try {next = parseAgentSettings(data);} catch {throw new SetupError('Agent 设置格式不正确，请检查名称、预设和工作区。');}
+        if (next.voiceInput && !this.settings.voiceInput && !this.voiceReady) throw new SetupError('请先开通并检查这个机器人的飞书语音权限，再启用语音转文字。');
+        if (next.imageInput && !this.settings.imageInput && !this.imagesReady) throw new SetupError('请先开通并检查这个机器人的飞书图片权限，再启用图片识别。');
+        if (this.deps.validateAgent) next = await this.deps.validateAgent(next);
+        // Existing native logs keep their original workspace even when new topics move.
+        const oldWorkspace = this.settings.workspace || this.defaultWorkspace();
+        if (oldWorkspace && next.workspace !== this.settings.workspace) {
+          const stateDir = join(this.botDirectory()!, 'state');
+          const release = await acquireLock(stateDir);
+          try {await (await SessionStore.open(stateDir)).pinWorkspace(oldWorkspace);} finally {await release();}
+        }
+        try {await this.settingsStore.write(next);} catch {this.settingsFailed = true; throw new SetupError('Agent 设置未能可靠保存，请重启宿主后重新读取。');}
+        this.settings = next;
+        if (this.state.bot) this.state.bot.name = next.label || '我的 dsh 助手';
+        return this.snapshot();
+      }
+      if (endpoint === 'cancel-documents' || endpoint === 'cancel-input') {await this.cancelDocuments(); return this.snapshot();}
+      if (endpoint === 'enable-input') {
+        if (data.kind !== 'images' && data.kind !== 'voice') throw new SetupError('不支持的消息输入类型。');
+        const kind: MediaInputKind = data.kind;
+        if (!this.record?.verified || !this.record.ownerOpenId || this.job || !this.deps.platform.enableInput) throw new SetupError('请先连接并确认本人，再开通消息输入权限。');
+        if (kind === 'images' ? this.imagesReady : this.voiceReady) return this.snapshot();
+        if (this.documentJob) {
+          if (this.inputSetup?.kind === kind) return this.snapshot();
+          throw new SetupError('请先完成或取消当前的权限检查与授权。');
+        }
+        const record = this.record, aborter = this.documentAborter = new AbortController();
+        const feature = kind === 'images' ? '图片' : '语音';
+        this.inputSetup = {kind, phase: 'preparing', message: `正在准备${feature}权限授权。`};
+        this.documentJob = this.deps.platform.enableInput(record.profile, kind, info => {
+          const url = officialDestination(info.url), expiresAt = Date.now() + info.expireIn * 1000;
+          void (this.deps.qr ?? (url => QRCode.toDataURL(url, {width: 256, margin: 2})))(url).then(image => {
+            if (aborter.signal.aborted || this.closed || this.documentAborter !== aborter) return;
+            this.inputSetup = {kind, phase: 'scanning', message: `用飞书扫码为这个机器人开通${feature}权限，完成后再勾选并保存输入设置。`, qr: {url, image, expiresAt}};
+          }).catch(() => {if (!aborter.signal.aborted) {this.inputSetup = {kind, phase: 'error', message: '二维码未能生成，请重试。'}; aborter.abort();}});
+        }, aborter.signal, record.appId).then(async () => {
+          if (aborter.signal.aborted || this.closed) return;
+          const inspection = await this.deps.platform.inspect(record.profile, aborter.signal);
+          if (aborter.signal.aborted || this.closed || this.record?.appId !== record.appId) return;
+          if (inspection.appId !== record.appId || inspection.botOpenId !== record.botOpenId) throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
+          this.inspectCapabilities(inspection);
+          if (!(kind === 'images' ? this.imagesReady : this.voiceReady)) throw new SetupError('飞书权限尚未生效，请确认审批和发布完成后重新检查连接。');
+          this.inputSetup = undefined;
+        }).catch(error => {
+          if (!aborter.signal.aborted && !this.closed) this.inputSetup = {kind, phase: 'error', message: errorMessage(error)};
+        }).finally(() => {if (this.documentAborter === aborter) {this.documentJob = undefined; this.documentAborter = undefined;}});
+        return this.snapshot();
+      }
       if (endpoint === 'enable-documents') {
         if (!this.record?.verified || !this.record.ownerOpenId || this.job || !this.deps.platform.enableDocuments) throw new SetupError('请先连接并确认本人，再补充默认权限。');
         if (this.documentsReady) return this.snapshot();
-        if (this.documentJob) return this.snapshot();
+        if (this.documentJob) {
+          if (this.inputSetup) throw new SetupError('请先完成或取消当前的消息输入授权。');
+          return this.snapshot();
+        }
         const record = this.record, aborter = this.documentAborter = new AbortController();
         this.documentSetup = {phase: 'preparing', message: '正在准备默认权限授权，聊天连接继续保持。'};
         this.documentJob = this.deps.platform.enableDocuments(record.profile, info => {
@@ -238,6 +319,7 @@ export class ConnectionController {
           const profile = (await this.deps.platform.listProfiles(signal)).find(p => p.name === name);
           if (!profile) throw new SetupError('没有找到这个机器人，请刷新列表。');
           this.assertCurrent(signal);
+          this.deps.reserveApp?.(profile.appId);
           const previous = this.record?.profile === name && this.record.appId === profile.appId
             && this.record.brand === profile.brand ? this.record : undefined;
           await this.save({schema: 1, profile: name, appId: profile.appId, brand: profile.brand,
@@ -262,7 +344,19 @@ export class ConnectionController {
         if (!this.record) {this.phase('idle'); return this.snapshot();}
         if (this.service) {
           if (!this.record.verified || !this.record.enabled) throw new SetupError('本人验证尚未完成，请先安全停止连接后重新配对。');
+          if (endpoint === 'recheck' && !this.documentJob) {
+            const inspection = await this.deps.platform.inspect(this.record.profile, new AbortController().signal);
+            if (inspection.appId !== this.record.appId || inspection.botOpenId !== this.record.botOpenId) throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
+            this.inspectCapabilities(inspection);
+          }
           this.phase(this.service.ready() ? 'connected' : 'starting', this.service.ready() ? messages.connected : '正在重新连接飞书。');
+          return this.snapshot();
+        }
+        if (endpoint === 'recheck' && this.record.verified && !this.record.enabled) {
+          const inspection = await this.deps.platform.inspect(this.record.profile, new AbortController().signal);
+          if (inspection.appId !== this.record.appId || inspection.botOpenId !== this.record.botOpenId) throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
+          this.inspectCapabilities(inspection);
+          this.phase('paused');
           return this.snapshot();
         }
         this.deps.checkRuntime();
@@ -292,6 +386,7 @@ export class ConnectionController {
       }});
     this.assertCurrent(signal);
     this.phase('configuring');
+    this.deps.reserveApp?.(registration.appId);
     await this.deps.platform.saveNewProfile(profile, registration, signal);
     this.assertCurrent(signal);
     await this.save({schema: 1, profile, appId: registration.appId, brand: registration.brand,
@@ -305,8 +400,7 @@ export class ConnectionController {
     this.assertCurrent(signal);
     let record = this.record!;
     let inspection: Inspection = await this.deps.platform.inspect(record.profile, signal);
-    this.documentsReady = inspection.scopeStatus === 'verified' && defaultScopesReady(inspection.grantedScopes);
-    this.menuMissing = missingBotMenuEntries(inspection.menuEventKeys ?? []);
+    this.inspectCapabilities(inspection);
     this.assertCurrent(signal);
     if (inspection.appId !== record.appId || (record.botOpenId && inspection.botOpenId && record.botOpenId !== inspection.botOpenId)) {
       throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
@@ -342,6 +436,7 @@ export class ConnectionController {
         if (inspection.appId !== record.appId || (record.botOpenId && inspection.botOpenId && record.botOpenId !== inspection.botOpenId)) {
           throw new SetupError('机器人身份发生变化，请断开后重新绑定。', false);
         }
+        this.inspectCapabilities(inspection);
         await this.save({...this.record!, botOpenId: inspection.botOpenId ?? this.record!.botOpenId,
           creatorOpenId: this.record!.creatorOpenId ?? inspection.creatorOpenId});
       }
@@ -373,16 +468,23 @@ export class ConnectionController {
     this.state.confirmation = {id: this.candidate.id, label: '已收到配对消息，请确认这是你刚发送的私聊。'};
   }
 
+  private botDirectory(): string | undefined {
+    if (!this.record?.ownerOpenId) return;
+    const identity = createHash('sha256').update(JSON.stringify([this.record.appId, this.record.ownerOpenId])).digest('hex').slice(0, 24);
+    return join(this.deps.store.directory, 'bots', identity);
+  }
+  private defaultWorkspace(): string {const directory = this.botDirectory(); return directory ? join(directory, 'workspace') : '';}
   private async config(): Promise<BotConfig> {
     const record = this.record!;
     if (!record.ownerOpenId || !record.botOpenId) throw new SetupError('请先确认你的飞书身份。', false);
-    const identity = createHash('sha256').update(JSON.stringify([record.appId, record.ownerOpenId])).digest('hex').slice(0, 24);
-    const directory = join(this.deps.store.directory, 'bots', identity);
-    const cwd = join(directory, 'workspace');
+    const directory = this.botDirectory()!;
+    const cwd = this.settings.workspace || this.defaultWorkspace();
     await mkdir(cwd, {recursive: true, mode: 0o700});
     return parseConfig({profile: record.profile, botOpenId: record.botOpenId, stateDir: join(directory, 'state'),
       executable: this.deps.executable ?? 'lark-cli', users: [{openId: record.ownerOpenId, direct: true, directMode: 'harness',
-      groupChats: [], cwd, allowedTools: []}], cardInteractions: record.cards, loadingReaction: record.loading, botMenu: this.menuReady,
+      groupChats: [], cwd, allowedTools: [], ...(this.settings.agentPreset ? {agentPreset: this.settings.agentPreset} : {})}],
+      imageInput: this.settings.imageInput, voiceInput: this.settings.voiceInput,
+      cardInteractions: record.cards, loadingReaction: record.loading, botMenu: this.menuReady,
       // Without the CardKit scope a live card cannot be created and replies fall back to ordinary messages.
       streamingCards: true}, directory);
   }
@@ -449,7 +551,7 @@ export class ConnectionController {
   }
   private async cancelDocuments(): Promise<void> {
     this.documentAborter?.abort(); await this.documentJob;
-    this.documentJob = undefined; this.documentAborter = undefined; this.documentSetup = undefined;
+    this.documentJob = undefined; this.documentAborter = undefined; this.documentSetup = undefined; this.inputSetup = undefined;
   }
   async dispose(): Promise<boolean> {
     this.closed = true; await this.cancel(); await this.commands;

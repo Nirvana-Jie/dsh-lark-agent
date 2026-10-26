@@ -5,6 +5,12 @@ import type {ConnectionSnapshot} from '../src/onboarding/protocol.js';
 const idle: ConnectionSnapshot = {phase: 'idle', message: '', busy: false, capabilities: {cards: true, loading: true}};
 
 describe('owner connection API', () => {
+  it('validates input authorization and refuses untrusted links or arbitrary feature names', () => {
+    const setup = {kind: 'voice', phase: 'scanning', message: '扫码授权', qr: {url: 'https://open.feishu.cn/verify', image: 'data:image/png;base64,YQ==', expiresAt: 100}};
+    expect(parseSnapshot({...idle, inputSetup: setup}).inputSetup).toEqual(setup);
+    expect(() => parseSnapshot({...idle, inputSetup: {...setup, kind: 'drive'}})).toThrow();
+    expect(() => parseSnapshot({...idle, inputSetup: {...setup, qr: {...setup.qr, url: 'https://evil.example'}}})).toThrow();
+  });
   it('accepts a release notice made of plain version numbers only', () => {
     expect(parseSnapshot({...idle, update: {current: '0.2.0', latest: '0.3.0'}}).update).toEqual({current: '0.2.0', latest: '0.3.0'});
     expect(() => parseSnapshot({...idle, update: {current: '0.2.0', latest: '<b>0.3</b>'}})).toThrow();

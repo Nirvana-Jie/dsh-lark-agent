@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { registerApp as sdkRegisterApp } from '@larksuiteoapi/node-sdk';
 import {BOT_MENU_EVENT} from '../bot-menu.js';
-import {DOCUMENT_SCOPES, STREAMING_SCOPE, defaultScopesReady} from '../rich-scopes.js';
+import {DOCUMENT_SCOPES, STREAMING_SCOPE} from '../rich-scopes.js';
+import {mediaScopes, type MediaInputKind} from '../media-scopes.js';
 
 // The SDK exports registerApp but not the named option/result interfaces in 1.76.0.
 type RegisterAppOptions = Parameters<typeof sdkRegisterApp>[0];
@@ -235,14 +236,24 @@ export class LarkPlatform {
 
   /** Incremental, owner-confirmed authorization; returned credentials never leave this method. */
   async enableDocuments(profile: string, onQRCode: (info: {url: string; expireIn: number}) => void, signal: AbortSignal): Promise<void> {
+    return this.authorizeScopes(profile, [...DOCUMENT_SCOPES, STREAMING_SCOPE], onQRCode, signal);
+  }
+
+  async enableInput(profile: string, kind: MediaInputKind, onQRCode: (info: {url: string; expireIn: number}) => void, signal: AbortSignal, expectedAppId: string): Promise<void> {
+    if ((kind !== 'images' && kind !== 'voice') || !validId(expectedAppId, 'cli')) fail('INVALID_INPUT');
+    return this.authorizeScopes(profile, mediaScopes(kind), onQRCode, signal, expectedAppId);
+  }
+
+  private async authorizeScopes(profile: string, scopes: readonly string[], onQRCode: (info: {url: string; expireIn: number}) => void, signal: AbortSignal, expectedAppId?: string): Promise<void> {
     const selected = await this.profile(profile, signal);
+    if (expectedAppId !== undefined && selected.appId !== expectedAppId) fail('APP_MISMATCH');
     try {
       const current = await this.inspect(profile, signal);
       if (current.appId !== selected.appId) fail('APP_MISMATCH');
       // Another host may already have completed the upgrade; never ask for another scan just to refresh UI state.
-      if (current.scopeStatus === 'verified' && defaultScopesReady(current.grantedScopes)) return;
+      if (current.scopeStatus === 'verified' && scopes.every(scope => current.grantedScopes.includes(scope))) return;
       const result = await this.registrar({source: 'dsh-larkbot', appId: selected.appId, signal,
-        addons: {preset: false, scopes: {tenant: [...DOCUMENT_SCOPES, STREAMING_SCOPE]}},
+        addons: {preset: false, scopes: {tenant: [...scopes]}},
         onQRCodeReady: info => {
           checkSignal(signal);
           let url: URL; try {url = new URL(info.url);} catch {return fail('INVALID_RESPONSE');}
@@ -255,7 +266,7 @@ export class LarkPlatform {
       checkSignal(signal);
       if (result.client_id !== selected.appId || (result.user_info?.tenant_brand && result.user_info.tenant_brand !== selected.brand)) fail('APP_MISMATCH');
       const inspection = await this.inspect(profile, signal);
-      if (inspection.appId !== selected.appId || inspection.scopeStatus !== 'verified' || !defaultScopesReady(inspection.grantedScopes)) fail('MISSING_SCOPE');
+      if (inspection.appId !== selected.appId || inspection.scopeStatus !== 'verified' || !scopes.every(scope => inspection.grantedScopes.includes(scope))) fail('MISSING_SCOPE');
     } catch (error) {checkSignal(signal); if (error instanceof LarkPlatformError) throw error; fail('REGISTRATION_FAILED');}
   }
 

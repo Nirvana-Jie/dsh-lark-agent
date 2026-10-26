@@ -8,7 +8,9 @@ export interface IncomingMessage {
   chatType: 'p2p' | 'group';
   threadId: string;
   text: string;
+  resources?: IncomingResource[];
 }
+export interface IncomingResource {kind: 'image' | 'audio'; key: string; messageId: string; duration?: number}
 const object = (v: unknown): Record<string, unknown> | undefined => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
 const validId = (v: unknown, prefix: string): v is string => typeof v === 'string' && new RegExp(`^${prefix}_[a-zA-Z0-9_-]+$`).test(v);
 
@@ -16,7 +18,7 @@ const validId = (v: unknown, prefix: string): v is string => typeof v === 'strin
 export function parseMessage(raw: unknown, botOpenId: string): IncomingMessage | undefined {
   const data = object(raw);
   if (!data || data.type !== 'im.message.receive_v1' || data.sender_type !== 'user') return;
-  if (data.message_type !== 'text' && data.message_type !== 'post') return;
+  if (!['text', 'post', 'image', 'audio'].includes(String(data.message_type))) return;
   if (!validId(data.message_id, 'om') || !validId(data.chat_id, 'oc') || !validId(data.sender_id, 'ou')) return;
   if (data.chat_type !== 'p2p' && data.chat_type !== 'group') return;
   if (typeof data.content !== 'string' || data.sender_id === botOpenId) return;
@@ -26,6 +28,24 @@ export function parseMessage(raw: unknown, botOpenId: string): IncomingMessage |
   // Text events render @name; rich posts can render <at user_id="...">.
   // Authorization always uses the structured open_id, never a display name.
   let text = data.content;
+  const resources: IncomingResource[] = [];
+  // The CLI compact contract renders media markers, not the original Lark JSON.
+  // Keys stay bound to this real event's message ID; no arbitrary URL or path is accepted.
+  if (data.message_type === 'image' || data.message_type === 'post') {
+    text = text.replace(/\[Image: (img_[A-Za-z0-9_-]{1,200})\]|!\[Image\]\((img_[A-Za-z0-9_-]{1,200})\)/g, (_tag, marker: string | undefined, inline: string | undefined) => {
+      const key = (marker ?? inline)!;
+      if (!resources.some(resource => resource.key === key)) resources.push({kind: 'image', key, messageId: data.message_id as string});
+      return '';
+    });
+    if (data.message_type === 'image' && (!resources.length || text.trim())) return;
+  }
+  if (data.message_type === 'audio') {
+    const audio = /^<audio key="(file_[A-Za-z0-9_-]{1,200})"(?: duration="([0-9]{1,6})s")?\s*\/>$/.exec(text.trim());
+    if (!audio) return;
+    resources.push({kind: 'audio', key: audio[1]!, messageId: data.message_id,
+      ...(audio[2] === undefined ? {} : {duration: Number(audio[2])})});
+    text = '';
+  }
   for (const mention of ours) {
     if (typeof mention.key === 'string' && mention.key.length > 0) text = text.split(mention.key).join('');
   }
@@ -36,11 +56,13 @@ export function parseMessage(raw: unknown, botOpenId: string): IncomingMessage |
       text = text.slice(rendered.length).trimStart();
     }
   }
-  if (!text) return;
+  if (!text && !resources.length) return;
+  if (!text) text = data.message_type === 'audio' ? '请处理这段语音。' : '请查看这些图片。';
   // Only a real Lark thread is its own conversation. A quote reply also carries
   // root_id, but it continues the chat's current conversation.
   const threadId = typeof data.thread_id === 'string' && /^(om|omt)_[a-zA-Z0-9_-]+$/.test(data.thread_id) ? data.thread_id : '';
-  return {messageId: data.message_id, chatId: data.chat_id, senderId: data.sender_id, chatType: data.chat_type, threadId, text};
+  return {messageId: data.message_id, chatId: data.chat_id, senderId: data.sender_id, chatType: data.chat_type, threadId, text,
+    ...(resources.length ? {resources} : {})};
 }
 export function authorize(message: IncomingMessage, config: BotConfig): UserPolicy | undefined {
   const policy = config.users.find(user => user.openId === message.senderId);

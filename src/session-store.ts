@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import {join, isAbsolute} from 'node:path';
 
 export interface SessionContext {
   ownerKey: string;
@@ -15,6 +15,8 @@ export interface SavedSession {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Workspace captured when this native session was created. */
+  cwd?: string;
 }
 
 interface SavedContext extends SessionContext {
@@ -107,10 +109,12 @@ function parseDocument(value: unknown): StoreDocument {
           || !timestamp(session.createdAt) || !timestamp(session.updatedAt)
           || session.updatedAt < session.createdAt) throw new Error();
         const title = titleText(session.title);
+        if (session.cwd !== undefined && (typeof session.cwd !== 'string' || !isAbsolute(session.cwd) || CONTROLS.test(session.cwd))) throw new Error();
         if (title !== session.title || sessionIds.has(session.id) || nativeIds.has(session.nativeId.toLowerCase())) throw new Error();
         sessionIds.add(session.id);
         nativeIds.add(session.nativeId.toLowerCase());
-        return {id: session.id, nativeId: session.nativeId, title, createdAt: session.createdAt, updatedAt: session.updatedAt};
+        return {id: session.id, nativeId: session.nativeId, title, createdAt: session.createdAt, updatedAt: session.updatedAt,
+          ...(session.cwd === undefined ? {} : {cwd: session.cwd as string})};
       });
       if (entry.activeId !== null && (typeof entry.activeId !== 'string' || !sessions.some(session => session.id === entry.activeId))) throw new Error();
       const ownerCount = (ownerCounts.get(entry.ownerKey) ?? 0) + sessions.length;
@@ -225,11 +229,12 @@ export class SessionStore {
       .map(session => ({...session})).sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
   }
 
-  add(context: SessionContext, nativeId: string, title = '新会话'): Promise<SavedSession> {
+  add(context: SessionContext, nativeId: string, title = '新会话', cwd?: string): Promise<SavedSession> {
     const identity = {...context};
     return this.mutate(identity, draft => {
       if (identity.sessionId !== undefined) throw new SessionStoreError('INVALID_INPUT');
       if (!NATIVE_ID.test(nativeId)) throw new SessionStoreError('INVALID_INPUT');
+      if (cwd !== undefined && (!isAbsolute(cwd) || CONTROLS.test(cwd))) throw new SessionStoreError('INVALID_INPUT');
       const safeTitle = titleText(title);
       let entry = this.locate(draft, identity);
       const owned = draft.contexts.filter(candidate => candidate.ownerKey === identity.ownerKey);
@@ -240,12 +245,28 @@ export class SessionStore {
       let id: string;
       do { id = randomBytes(6).toString('hex'); } while (usedIds.has(id));
       const time = this.nextTimestamp(draft);
-      const session: SavedSession = {id, nativeId, title: safeTitle, createdAt: time, updatedAt: time};
+      const session: SavedSession = {id, nativeId, title: safeTitle, createdAt: time, updatedAt: time, ...(cwd === undefined ? {} : {cwd})};
       if (!entry) { entry = {ownerKey: identity.ownerKey, conversationKey: identity.conversationKey, activeId: null, sessions: []}; draft.contexts.push(entry); }
       entry.sessions.push(session);
       entry.activeId = id;
       return {value: session, changed: true};
     });
+  }
+
+  /** Under the bot's state lock, capture legacy rows before its workspace changes. */
+  pinWorkspace(cwd: string): Promise<void> {
+    const job = this.tail.then(async () => {
+      this.assertAvailable();
+      if (!isAbsolute(cwd) || CONTROLS.test(cwd)) throw new SessionStoreError('INVALID_INPUT');
+      const draft = structuredClone(this.document);
+      let changed = false;
+      for (const context of draft.contexts) for (const session of context.sessions) {
+        if (session.cwd === undefined) {session.cwd = cwd; changed = true;}
+      }
+      if (changed) {await this.persist(draft); this.document = draft;}
+    });
+    this.tail = job.catch(() => undefined);
+    return job;
   }
 
   activate(context: SessionContext, id: string): Promise<SavedSession> {

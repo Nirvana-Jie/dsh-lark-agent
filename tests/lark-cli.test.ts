@@ -3,6 +3,8 @@ import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { consumerFree, LarkCli, noActiveConsumers } from '../src/lark-cli.js';
+import {writeFile, lstat} from 'node:fs/promises';
+import {join} from 'node:path';
 
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
@@ -13,6 +15,55 @@ class FakeChild extends EventEmitter {
   kill = vi.fn((_signal?: NodeJS.Signals) => true);
   close(code: number | null = 0) { this.emit('close', code, null); }
 }
+
+describe('bounded incoming media commands', () => {
+  afterEach(() => {vi.mocked(spawn).mockReset();});
+  it('downloads with a fixed profile, bot identity, original message and private relative output', async () => {
+    let directory = '';
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    vi.mocked(spawn).mockImplementation((_file, _args, options) => {
+      const child = new FakeChild(); directory = (options as {cwd: string}).cwd;
+      child.stdin.on('finish', () => {void writeFile(join(directory, 'resource.bin'), png).then(() => {
+        child.stdout.write(JSON.stringify({ok: true, data: {saved_path: '/untrusted/returned/path'}})); child.close();
+      });});
+      return child as unknown as ReturnType<typeof spawn>;
+    });
+    const cli = new LarkCli({profile: 'bot-fixture'});
+    expect(await cli.readResource({kind: 'image', key: 'img_fixture', messageId: 'om_original'}, new AbortController().signal)).toEqual(png);
+    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toEqual(['--profile', 'bot-fixture', 'im', '+messages-resources-download', '--message-id', 'om_original', '--file-key', 'img_fixture', '--type', 'image', '--output', './resource.bin', '--as', 'bot', '--format', 'json']);
+    await expect(lstat(directory)).rejects.toMatchObject({code: 'ENOENT'});
+    await cli.stop();
+  });
+  it('sends speech bytes through stdin and validates the CLI envelope', async () => {
+    let input = '';
+    vi.mocked(spawn).mockImplementation(() => {
+      const child = new FakeChild();
+      child.stdin.on('data', chunk => {input += chunk.toString();});
+      child.stdin.on('finish', () => {queueMicrotask(() => {child.stdout.write(JSON.stringify({ok: true, data: {recognition_text: '你好'}})); child.close();});});
+      return child as unknown as ReturnType<typeof spawn>;
+    });
+    const cli = new LarkCli({profile: 'bot-fixture'});
+    expect(await cli.recognizeSpeech(Buffer.from([1, 2, 3, 4]), new AbortController().signal)).toBe('你好');
+    expect(JSON.parse(input)).toMatchObject({config: {format: 'pcm', engine_type: '16k_auto'}, speech: {speech: 'AQIDBA=='}});
+    expect(vi.mocked(spawn).mock.calls[0]?.[1]).not.toContain('AQIDBA==');
+    await cli.stop();
+  });
+  it('drains a cancelled subprocess before completing the media read', async () => {
+    const child = new FakeChild(); vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+    const cli = new LarkCli({profile: 'bot-fixture'}), aborter = new AbortController();
+    const run = cli.recognizeSpeech(Buffer.from([1, 2]), aborter.signal);
+    const rejected = expect(run).rejects.toThrow('stopped');
+    aborter.abort(); expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    let finished = false; void run.catch(() => {finished = true;});
+    await Promise.resolve(); expect(finished).toBe(false);
+    child.close(null); await rejected; await cli.stop();
+  });
+  it('rejects path or URL resource keys before starting the CLI', async () => {
+    const cli = new LarkCli({profile: 'bot-fixture'});
+    await expect(cli.readResource({kind: 'image', key: '../../private', messageId: 'om_original'}, new AbortController().signal)).rejects.toThrow();
+    expect(spawn).not.toHaveBeenCalled(); await cli.stop();
+  });
+});
 
 describe('confirmed native topic creation', () => {
   afterEach(() => {vi.mocked(spawn).mockReset();});
