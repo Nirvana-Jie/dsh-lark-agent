@@ -32,6 +32,8 @@ export class ConnectionManager {
       const owner = this.claims.get(appId);
       if (owner && owner !== id) throw new SetupError('这个机器人已在列表中，请直接打开对应的机器人。', false);
       this.claims.set(appId, id);
+    }, commitApp: appId => {
+      for (const [reserved, owner] of this.claims) if (owner === id && reserved !== appId) this.claims.delete(reserved);
     }});
   }
   async initialize(): Promise<void> {

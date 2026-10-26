@@ -31,6 +31,8 @@ export interface OnboardingDependencies {
   retryDelay?: (attempt: number) => number;
   validateAgent?: (settings: AgentSettings) => Promise<AgentSettings>;
   reserveApp?: (appId: string) => void;
+  /** Release former reservations only after the replacement record is durable. */
+  commitApp?: (appId: string) => void;
 }
 
 const restoreDelay = (attempt: number) => Math.min(10 * 60_000, 5_000 * 2 ** Math.min(attempt, 10));
@@ -131,7 +133,11 @@ export class ConnectionController {
     this.menuMissing = missingBotMenuEntries(inspection.menuEventKeys ?? []);
   }
   private assertCurrent(signal: AbortSignal): void {signal.throwIfAborted(); if (this.closed) throw new SetupError('连接设置已关闭。');}
-  private async save(record: ConnectionRecord): Promise<void> {await this.deps.store.write(record); this.record = record;}
+  private async save(record: ConnectionRecord): Promise<void> {
+    await this.deps.store.write(record);
+    this.record = record;
+    this.deps.commitApp?.(record.appId);
+  }
   private launch(work: (signal: AbortSignal) => Promise<void>): void {
     this.clearRetry();
     const generation = ++this.generation;

@@ -78,6 +78,33 @@ describe('independent robot controllers', () => {
     expect(f.manager.snapshot(selectedId).message).toContain('已在列表');
     expect(f.starts.size).toBe(0);
   });
+  it('releases the former bot after an entry durably switches to another app', async () => {
+    const f = await fixture();
+    await f.manager.command('disconnect', {});
+    await f.manager.command('use-profile', {name: 'bot-second'});
+    await vi.waitFor(() => expect(f.manager.snapshot().phase).toBe('connected'));
+    const {selectedId} = await f.manager.add();
+    await f.manager.command('use-profile', {name: 'bot-first-alias'}, selectedId);
+    await vi.waitFor(() => expect(f.manager.snapshot(selectedId).phase).toBe('connected'));
+    expect(f.manager.snapshot().bot?.appId).toBe('cli_second');
+    expect(f.manager.snapshot(selectedId).bot?.appId).toBe('cli_first');
+  });
+  it('retains both identity claims when a replacement record cannot be saved', async () => {
+    const f = await fixture(), original = ConnectionStore.prototype.write;
+    const write = vi.spyOn(ConnectionStore.prototype, 'write').mockImplementation(function(this: ConnectionStore, record) {
+      return record.appId === 'cli_second' ? Promise.reject(new Error('uncertain publication')) : original.call(this, record);
+    });
+    try {
+      await f.manager.command('use-profile', {name: 'bot-second'});
+      await vi.waitFor(() => expect(f.manager.snapshot().phase).toBe('error'));
+      const {selectedId} = await f.manager.add();
+      for (const name of ['bot-first-alias', 'bot-second']) {
+        await f.manager.command('use-profile', {name}, selectedId);
+        await vi.waitFor(() => expect(f.manager.snapshot(selectedId).phase).toBe('error'));
+        expect(f.manager.snapshot(selectedId).message).toContain('已在列表');
+      }
+    } finally {write.mockRestore();}
+  });
   it('serializes additions at the limit and refuses caller-controlled directory paths', async () => {
     const f = await fixture();
     const results = await Promise.allSettled(Array.from({length: 12}, () => f.manager.add()));
