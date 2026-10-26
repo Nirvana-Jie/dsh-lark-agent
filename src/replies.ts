@@ -66,24 +66,35 @@ function externalUrl(value: string): boolean {
   } catch { return false; }
 }
 
-/** Turn unsupported links into visible inert text; preserve ordinary web links. */
+function escapeProse(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Lark takes Markdown hrefs literally: HTML escaping '&' changes their query keys. */
+function linkDestination(url: string): string {
+  return url.replace(/&(?=(?:#(?:x[0-9a-f]+|[0-9]+)|[a-z][a-z0-9]*;))/gi, '%26')
+    .replace(/["'`]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+}
+
+/** Escape prose and disable unsupported links while retaining safe HTTP(S) destinations. */
 function safeLinks(text: string): string {
   let result = '', cursor = 0;
   while (cursor < text.length) {
     const start = text.indexOf('](', cursor);
-    if (start < 0) return result + text.slice(cursor);
+    if (start < 0) return result + escapeProse(text.slice(cursor));
     let end = start + 2, depth = 1;
     for (; end < text.length; end++) {
       if (text[end] === '\\') { end++; continue; }
       if (text[end] === '(') depth++;
       if (text[end] === ')' && --depth === 0) break;
     }
-    if (end >= text.length) return result + text.slice(cursor);
+    if (end >= text.length) return result + escapeProse(text.slice(cursor));
     const destination = text.slice(start + 2, end).trim();
-    const url = destination.match(/^(<[^>]+>|\S+?)(?:\s+["'][\s\S]*["'])?$/)?.[1]?.replace(/^<|>$/g, '') ?? '';
-    result += text.slice(cursor, start) + (externalUrl(url)
-      ? text.slice(start, end + 1)
-      : `]（${destination}）`);
+    const parts = destination.match(/^(<[^>]+>|\S+?)(\s+["'][\s\S]*["'])?$/);
+    const url = parts?.[1]?.replace(/^<|>$/g, '') ?? '';
+    result += escapeProse(text.slice(cursor, start)) + (externalUrl(url)
+      ? `](${linkDestination(url)}${escapeProse(parts?.[2] ?? '')})`
+      : `]（${escapeProse(destination)}）`);
     cursor = end + 1;
   }
   return result;
@@ -93,11 +104,10 @@ function prose(text: string): string {
   let output = text
     .replace(/<(https?:\/\/[^<>\s]+)>/gi, (_match, url: string) => externalUrl(url) ? `[${url}](${url})` : url)
     .replace(/!\[/g, '[');
-  output = safeLinks(output);
   output = output.replace(/^( {0,3}\[[^\]\n]+\]):\s*(<?\S+>?)(.*)$/gm,
     (line, label: string, destination: string) => externalUrl(destination.replace(/^<|>$/g, '')) ? line : line.replace(`${label}:`, `${label}：`));
-  // Escape entities too, so an encoded <at> cannot become an active tag after decoding.
-  output = output.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Prose still escapes entities so encoded native tags cannot become active.
+  output = safeLinks(output);
   return output.replace(/^[ \t]*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?[ \t]*$/gm, line => {
     const cells = line.trim().replace(/^\||\|$/g, '').split('|');
     return `| ${cells.map(() => ':---').join(' | ')} |`;

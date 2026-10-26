@@ -191,7 +191,12 @@ describe('untrusted model Markdown', () => {
 
   it('preserves HTTPS query links and balanced parentheses', () => {
     const [payload] = renderAnswer('[文档](https://docs.test/path_(one)?a=1&b=2) 和 <https://docs.test>', 4000);
-    expect(payload).toEqual({kind: 'post', markdown: '[文档](https://docs.test/path_(one)?a=1&amp;b=2) 和 [https://docs.test](https://docs.test)'});
+    expect(payload).toEqual({kind: 'post', markdown: '[文档](https://docs.test/path_(one)?a=1&b=2) 和 [https://docs.test](https://docs.test)'});
+  });
+
+  it('preserves query separators while keeping encoded tags and link titles inert', () => {
+    const [payload] = renderAnswer('[说明 &lt;at&gt;](https://docs.test/?a=1&b=2 "标题 &lt;at&gt;") 和 [实体](https://docs.test/?x=&lt;at&y=&#60;person)', 4000);
+    expect(payload).toEqual({kind: 'post', markdown: '[说明 &amp;lt;at&amp;gt;](https://docs.test/?a=1&b=2 "标题 &amp;lt;at&amp;gt;") 和 [实体](https://docs.test/?x=%26lt;at&y=%26#60;person)'});
   });
 
   it.each(['javascript:alert(1)', 'data:text/html,hello', 'file:///etc/passwd', 'ftp://files.test/a', 'https://name:secret@docs.test/a', 'javascript&#58;alert(1)'])('disables unsafe Markdown link destination %s', destination => {
@@ -217,6 +222,19 @@ describe('untrusted model Markdown', () => {
 });
 
 describe('application panels', () => {
+  it('keeps topic navigation query parameters intact in the rendered card', () => {
+    const link = 'https://applink.feishu.cn/client/thread/open?open_chat_id=oc_example&open_thread_id=omt_example&openchatid=oc_example&openthreadid=omt_example&thread_position=0';
+    const card = cardOf(renderPanel({title: '话题已就绪', summary: '打开新话题继续',
+      sections: [{text: `已准备好。[打开话题继续](${link})。`}]}));
+    const text = components(card, 'markdown').map(row => row.content).join('\n');
+    const destination = /\]\((https:[^)]+)\)/.exec(text)?.[1];
+    expect(destination).toBeDefined();
+    const url = new URL(destination!);
+    expect(url.searchParams.get('open_thread_id')).toBe('omt_example');
+    expect(url.searchParams.get('thread_position')).toBe('0');
+    expect(destination).toBe(link);
+  });
+
   it('keeps section headings separate from original body content without fake controls', () => {
     const card = cardOf(renderPanel({title: '机器人状态', summary: '会话已恢复且个人记忆可用', sections: [
       {title: '当前会话', text: '已从磁盘恢复。'}, {title: '长期记忆', text: '同一用户跨聊天可用。'},
