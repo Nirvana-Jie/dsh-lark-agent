@@ -18,6 +18,7 @@ vi.mock('../src/config.js', () => ({loadConfig: state.loadConfig}));
 vi.mock('../src/lock.js', () => ({acquireLock: state.acquireLock}));
 vi.mock('../src/ledger.js', () => ({DiskLedger: {open: state.ledgerOpen}}));
 vi.mock('../src/session-store.js', () => ({SessionStore: {open: state.sessionsOpen}}));
+vi.mock('../src/topic-store.js', () => ({TopicStore: {open: async () => ({})}}));
 vi.mock('../src/memory-store.js', () => ({MemoryStore: {open: state.memoriesOpen}}));
 vi.mock('../src/card-actions.js', () => ({CardActions: {open: state.actionsOpen}}));
 vi.mock('../src/direct-chats.js', () => ({DirectChatsStore: {open: async () => ({})}}));

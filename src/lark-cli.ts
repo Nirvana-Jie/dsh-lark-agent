@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { ReplyPayload } from './replies.js';
+import {topicLink, type TopicReceipt} from './topic-store.js';
 
 export type LarkEventKey = 'im.message.receive_v1' | 'card.action.trigger' | 'application.bot.menu_v6';
 
@@ -316,6 +317,58 @@ export class LarkCli {
     return this.sendRichUser(openId, {kind: 'text', text}, options);
   }
 
+  /** Open a native topic and keep its raw receipt; the reply shortcut drops thread_id. */
+  async openTopic(target: {chatId: string; messageId?: string}, title: string,
+    options: {idempotencyKey: string}): Promise<TopicReceipt> {
+    if (!target || typeof target.chatId !== 'string' || !/^oc_[A-Za-z0-9_-]{1,128}$/.test(target.chatId)
+      || (target.messageId !== undefined && !/^om_[A-Za-z0-9_-]{1,256}$/.test(target.messageId))
+      || typeof title !== 'string' || !title.trim() || Array.from(title).length > 80 || /[\u0000-\u001f\u007f-\u009f]/.test(title)
+      || !/^[A-Za-z0-9._:-]{1,45}$/.test(options?.idempotencyKey)) throw new Error('Invalid Lark topic target.');
+    const text = `话题：${title}\n请在这个话题里继续。群聊中仍需 @机器人。`;
+    const request = async (path: string, data: Record<string, unknown>, params?: string) => {
+      const result = await this.executeJson(['api', 'POST', path, ...(params ? ['--params', params] : []),
+        '--data', '-', '--as', 'bot', '--format', 'json'], JSON.stringify(data), 'reply', this.commandTimeoutMs);
+      this.confirmFeedback(result);
+      const receipt = result.data as Record<string, unknown> | undefined;
+      if (!receipt || typeof receipt.message_id !== 'string' || !/^om_[A-Za-z0-9_-]{1,256}$/.test(receipt.message_id)
+        || receipt.chat_id !== target.chatId) throw new Error('Lark topic creation was not confirmed; delivery is unknown.');
+      return receipt;
+    };
+    let anchor = target.messageId;
+    let receipt: Record<string, unknown> | undefined;
+    if (!anchor) {
+      // Menu events and replies inside another topic cannot be used as a new root.
+      // Confirm the root before replying; never invent a message ID or retry an unknown send.
+      receipt = await request('/open-apis/im/v1/messages', {receive_id: target.chatId, msg_type: 'text',
+        content: JSON.stringify({text}), uuid: `${options.idempotencyKey}:root`}, '{"receive_id_type":"chat_id"}');
+      anchor = receipt.message_id as string;
+    }
+    if (!receipt?.thread_id) receipt = await request(`/open-apis/im/v1/messages/${anchor}/reply`,
+      {msg_type: 'text', content: JSON.stringify({text: target.messageId ? text : '在这里继续这个话题。'}),
+        reply_in_thread: true, uuid: `${options.idempotencyKey}:open`});
+    if (typeof receipt.thread_id !== 'string' || !/^(?:om|omt)_[A-Za-z0-9_-]{1,256}$/.test(receipt.thread_id)) {
+      throw new Error('Lark topic creation did not return a thread ID; delivery is unknown.');
+    }
+    const messageId = receipt.message_id as string;
+    const link = await this.topicLink(messageId);
+    return {threadId: receipt.thread_id, messageId, ...(link ? {link} : {})};
+  }
+
+  /** Optional read enrichment. A missing link must never cause another topic creation. */
+  async topicLink(messageId: string): Promise<string | undefined> {
+    if (!/^om_[A-Za-z0-9_-]{1,256}$/.test(messageId)) throw new Error('Invalid Lark topic anchor.');
+    try {
+      const result = await this.executeJson(['im', '+messages-mget', '--message-ids', messageId, '--no-reactions',
+        '--as', 'bot', '--format', 'json'], '', 'read', Math.min(this.commandTimeoutMs, 5_000));
+      this.confirmFeedback(result);
+      const data = result.data as Record<string, unknown> | undefined;
+      const rows = data?.messages ?? result.messages;
+      if (!Array.isArray(rows)) return;
+      const message = rows.find(row => row && typeof row === 'object' && row.message_id === messageId) as Record<string, unknown> | undefined;
+      return topicLink(message?.thread_app_link) ?? topicLink(message?.message_app_link);
+    } catch {return;}
+  }
+
   /** Create a short-lived loading card; its receipt stays inside the bridge. */
   async createFeedback(target: {openId: string} | {messageId: string; inThread: boolean}, payload: ReplyPayload,
     options: {idempotencyKey: string}): Promise<string> {
@@ -571,11 +624,11 @@ export class LarkCli {
     return this.executeJson(args, input, 'reply', this.commandTimeoutMs).then(() => undefined);
   }
 
-  private executeJson(args: string[], input: string, operation: 'reply' | 'progress' | 'send' | 'feedback' | 'card', deadlineMs: number,
+  private executeJson(args: string[], input: string, operation: 'reply' | 'progress' | 'send' | 'feedback' | 'card' | 'read', deadlineMs: number,
     cwd?: string): Promise<Record<string, unknown>> {
     if (this.stopped) return Promise.reject(new Error('Lark transport is stopped.'));
     const label = `Lark ${operation} command`;
-    const uncertain = operation === 'progress' || operation === 'card' ? 'result is unknown.' : 'delivery is unknown.';
+    const uncertain = operation === 'progress' || operation === 'card' || operation === 'read' ? 'result is unknown.' : 'delivery is unknown.';
     return new Promise((resolve, reject) => {
       let child: ChildProcessWithoutNullStreams;
       try { child = this.launch(args, cwd); } catch {

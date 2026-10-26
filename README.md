@@ -66,7 +66,7 @@ Button labels are quoted in Chinese, as they appear, with an English gloss.
 3. Click **打开飞书私聊** (open private chat) and, from the account that scanned, send the pairing word (`DSH-…`, valid for 10 minutes) as a plain-text message on its own, exactly as shown. If asked, confirm with **这是我，完成连接** (this is me).
 4. When the page shows **已连接** (connected), send the bot a message.
 
-The Feishu entry works only while the host is online: not when the app is closed, the web host is stopped, or the computer sleeps.
+The connection's model check does not create a “飞书连接测试” conversation in Harness. The Feishu entry works only while the host is online: not when the app is closed, the web host is stopped, or the computer sleeps.
 
 ## What it can do
 
@@ -78,13 +78,15 @@ The Feishu entry works only while the host is online: not when the app is closed
 | Use `/permission`, or **设置 → 权限模式** (Settings → Permission mode) in the bottom menu | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking. The card you tap updates in place and turns green when done |
 | Ask for the result file | Sends files from its workspace straight to the chat |
 | Say "lead with the conclusion from now on" | Remembers the preference |
-| Keep chatting, or use `/sessions`, `/new` | Continues the topic, returns to an earlier one, or starts fresh |
+| Continue inside a topic, or use `/sessions`, `/new` | Keeps each conversation in its own native Feishu topic, opens an earlier topic, or creates a new one |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |
 | Ask it to let you pick between options first | Sends a form card and continues once you submit |
 | Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2` / `rc.3`, opening that Feishu session in the app also shows a local preview |
 | Use `/model`, `/thinking` | Switches between the host's configured models and thinking depth, in sync with Harness on your computer (App `0.2.1-rc.2` / `rc.3`) |
 
 By default it answers only your own private chat. In that chat the assistant is your Harness itself: the tools it can use and the actions that need your confirmation follow the permission settings on your computer. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
+
+A new request in the main chat opens a topic; continue inside that topic to keep its context. Authorized group chats work the same way and still require an @mention on each message. `/new` opens another topic and keeps the earlier ones available.
 
 ## Good to know
 
