@@ -8,9 +8,10 @@ import {createBotService, BotServiceStartError, type BotService} from '../bot-se
 import {checkRuntimeCompatibility} from '../dsh-runtime.js';
 import {acquireLock, LockHeldError} from '../lock.js';
 import {ConnectionController, SetupError} from './controller.js';
-import {ConnectionStore} from './store.js';
 import {LarkPlatform} from './lark-platform.js';
-import type {ConnectionEndpoint, ConnectionResult, ConnectionSnapshot} from './protocol.js';
+import type {ConnectionEndpoint, ConnectionResult, ConnectionSnapshot, AgentCatalog, ConnectionList} from './protocol.js';
+import {ConnectionManager, validConnectionId} from './manager.js';
+import {agentCatalog, parseAgentSettings, validateAgentSettings} from './agents.js';
 import {npmLatest, type Release, UpdateCheck} from './updates.js';
 import {checkConnectionModel} from './model-check.js';
 
@@ -24,10 +25,20 @@ export interface OwnerFetchRoutes {
   register(route: {path: string; methods: string[]; requestBody: 'buffered'; fetch(request: Request): Promise<Response>}): () => void | Promise<void>;
 }
 const endpoints = new Set<ConnectionEndpoint>(['status', 'profiles', 'create', 'use-profile', 'recheck', 'cancel',
-  'renew-pairing', 'confirm-owner', 'pause', 'resume', 'disconnect', 'enable-documents', 'cancel-documents']);
+  'renew-pairing', 'confirm-owner', 'pause', 'resume', 'disconnect', 'enable-documents', 'cancel-documents', 'enable-input', 'cancel-input', 'update-agent']);
+const managerEndpoints = ['connections', 'add-connection', 'remove-connection', 'agent-catalog'] as const;
+const allEndpoints = [...endpoints, ...managerEndpoints];
 const failure = (message: string): ConnectionResult<never> => ({ok: false, error: {code: 'internal', message, details: {}}});
 class ConnectionRegistrationCleanupError extends Error {}
-type ConnectionControl = Pick<ConnectionController, 'snapshot' | 'profiles' | 'command'>;
+type ConnectionControl = {
+  snapshot(id?: string): ConnectionSnapshot;
+  profiles(signal?: AbortSignal, id?: string): ReturnType<ConnectionController['profiles']>;
+  command(endpoint: Exclude<ConnectionEndpoint, 'status' | 'profiles'>, payload: unknown, id?: string): Promise<ConnectionSnapshot>;
+  list?(): ConnectionList;
+  add?(): Promise<ConnectionList & {selectedId: string}>;
+  remove?(id: string): Promise<ConnectionList & {selectedId: string}>;
+  catalog?(): Promise<AgentCatalog>;
+};
 
 /** Settings stay readable, but inert, while another running host owns this connection directory. */
 export function lockedConnectionControl(): ConnectionControl {
@@ -46,19 +57,31 @@ export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionContro
   const legacy = rpc.handle.length === 3;
   if (!legacy && rpc.handle.length !== 2) throw new SetupError('此 dsh 版本的连接接口尚未验证，请更新到支持的版本。');
   const dispatch = async (endpoint: string, payload: unknown, signal: AbortSignal): Promise<ConnectionResult<unknown>> => {
-    if (!endpoints.has(endpoint as ConnectionEndpoint)) return failure('不支持的连接操作。');
+    if (!allEndpoints.includes(endpoint as typeof allEndpoints[number])) return failure('不支持的连接操作。');
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return failure('连接请求格式不正确。');
-    const allowed = endpoint === 'create' ? ['cards', 'loading'] : endpoint === 'use-profile' ? ['name'] : endpoint === 'confirm-owner' ? ['id'] : [];
+    const manager = managerEndpoints.includes(endpoint as typeof managerEndpoints[number]);
+    const allowed = [...(manager && endpoint !== 'remove-connection' ? [] : ['connectionId']), ...(endpoint === 'create' ? ['cards', 'loading'] : endpoint === 'use-profile' ? ['name'] : endpoint === 'confirm-owner' ? ['id']
+      : endpoint === 'update-agent' ? ['label', 'agentPreset', 'workspace', 'imageInput', 'voiceInput'] : endpoint === 'enable-input' ? ['kind'] : [])];
     const data = payload as Record<string, unknown>;
     if (Object.keys(data).some(key => !allowed.includes(key)) || Object.values(data).some(value =>
-      !['boolean', 'string'].includes(typeof value) || (typeof value === 'string' && value.length > 200))) return failure('连接请求格式不正确。');
+      !['boolean', 'string'].includes(typeof value)) || Object.entries(data).some(([key, value]) => typeof value === 'string' && value.length > (key === 'workspace' ? 4096 : 200))
+      || (data.connectionId !== undefined && !validConnectionId(data.connectionId))) return failure('连接请求格式不正确。');
     if ((endpoint === 'create' && ['cards', 'loading'].some(key => data[key] !== undefined && typeof data[key] !== 'boolean'))
       || (endpoint === 'use-profile' && typeof data.name !== 'string')
-      || (endpoint === 'confirm-owner' && typeof data.id !== 'string')) return failure('连接请求格式不正确。');
+      || (endpoint === 'confirm-owner' && typeof data.id !== 'string')
+      || (endpoint === 'enable-input' && data.kind !== 'images' && data.kind !== 'voice')) return failure('连接请求格式不正确。');
+    if (endpoint === 'update-agent') {try {parseAgentSettings(data);} catch {return failure('Agent 设置格式不正确。');}}
     try {
-      if (endpoint === 'status') return {ok: true, value: controller.snapshot()};
-      if (endpoint === 'profiles') return {ok: true, value: await controller.profiles(signal)};
-      return {ok: true, value: await controller.command(endpoint as Exclude<ConnectionEndpoint, 'profiles' | 'status'>, payload)};
+      if (endpoint === 'connections' && controller.list) return {ok: true, value: controller.list()};
+      if (endpoint === 'add-connection' && controller.add) return {ok: true, value: await controller.add()};
+      if (endpoint === 'remove-connection' && controller.remove && typeof data.connectionId === 'string') return {ok: true, value: await controller.remove(data.connectionId)};
+      if (endpoint === 'agent-catalog' && controller.catalog) return {ok: true, value: await controller.catalog()};
+      if (manager) return failure('当前连接服务不支持机器人管理，请检查插件版本。');
+      const {connectionId, ...fields} = data;
+      if (endpoint === 'status') return {ok: true, value: connectionId === undefined ? controller.snapshot() : controller.snapshot(connectionId as string)};
+      if (endpoint === 'profiles') return {ok: true, value: await (connectionId === undefined ? controller.profiles(signal) : controller.profiles(signal, connectionId as string))};
+      const command = endpoint as Exclude<ConnectionEndpoint, 'profiles' | 'status'>;
+      return {ok: true, value: await (connectionId === undefined ? controller.command(command, fields) : controller.command(command, fields, connectionId as string))};
     } catch (error) {
       return failure(error instanceof SetupError ? error.message : '连接操作暂时失败，请检查本机服务后重试。');
     }
@@ -75,7 +98,7 @@ export function registerConnectionRpc(rpc: RpcHost, controller: ConnectionContro
         if (errors.length) throw new ConnectionRegistrationCleanupError('Connection routes could not be removed.');
       };
       try {
-        for (const endpoint of endpoints) {
+        for (const endpoint of allEndpoints) {
           disposers.push(ownerRoutes.register({path: `/api/larkbot/${endpoint}`, methods: ['POST'], requestBody: 'buffered',
             async fetch(request) {
               const envelope = await readConnectionEnvelope(request, `larkbot/${endpoint}`);
@@ -191,7 +214,8 @@ export async function applyOnboarding(ctx: Context, options: {dataDir?: string; 
     return;
   }
   const executable = await findLarkExecutable(options.executable);
-  const controller = new ConnectionController({store: new ConnectionStore(directory), platform: new LarkPlatform({executable}), executable,
+  const controller = new ConnectionManager(directory, () => ({platform: new LarkPlatform({executable}), executable,
+    validateAgent: settings => validateAgentSettings(ctx, settings),
     checkRuntime: () => requireRuntime(ctx),
     preflight: (config, signal) => checkConnectionModel(ctx, config, signal),
     start: async (config, signal, health, pairedChat) => {
@@ -200,14 +224,15 @@ export async function applyOnboarding(ctx: Context, options: {dataDir?: string; 
       try {signal.throwIfAborted(); service.start(); await waitReady(service, signal); return service;}
       catch (error) {if (!await service.stop()) throw new BotServiceStartError(service); throw error;}
     },
-  });
+  }), () => agentCatalog(ctx));
   const installed = installedPackage();
   const updates = new UpdateCheck(installed?.version, options.latestRelease
     ?? (signal => installed ? npmLatest(installed.name, signal) : Promise.resolve(undefined)));
   const control: ConnectionControl = {
-    snapshot: () => withUpdate(controller.snapshot(), updates),
-    profiles: signal => controller.profiles(signal),
-    command: async (endpoint, payload) => withUpdate(await controller.command(endpoint, payload), updates),
+    snapshot: id => withUpdate(controller.snapshot(id), updates),
+    profiles: (signal, id) => controller.profiles(signal, id),
+    command: async (endpoint, payload, id) => withUpdate(await controller.command(endpoint, payload, id), updates),
+    list: () => controller.list(), add: () => controller.add(), remove: id => controller.remove(id), catalog: () => controller.catalog(),
   };
   let remove: (() => Promise<void>) | undefined;
   try {

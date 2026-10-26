@@ -34,6 +34,7 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     let markStarted!: () => void;
     const started = new Promise<void>(resolve => { markStarted = resolve; });
     class OfflineAdapter extends llm.LlmAdapter {
+      async resolveModel(provider: string, model: string) {return {provider, id: model, name: 'Offline model', inputModalities: ['text', 'image']};}
       async *stream(request: {signal: AbortSignal}) {
         requests.push(request);
         markStarted();
@@ -59,8 +60,44 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     let adapter: InstanceType<typeof runtime.DshRuntime>;
     const owner = await mount({name: 'test-bot-owner', inject: ['agents', 'tools', 'sessions', 'sessionPersistence', 'systemPrompt'],
       apply(ctx: unknown) { adapter = new runtime.DshRuntime(ctx); }});
-    return {root, owner, adapter: adapter!, requests, started, runtime, prompts, tools, llm, close: () => root.fiber.dispose()};
+    return {root, owner, adapter: adapter!, requests, started, runtime, prompts, tools, llm, mount, close: () => root.fiber.dispose()};
   }
+
+  it('normalizes an inbound image through real attachment storage and restores its durable native reference', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-modern-image-'));
+    const hosts: Array<Awaited<ReturnType<typeof createHost>>> = [];
+    const policy = {cwd: join(directory, 'workspace'), allowedTools: [], provider: 'offline', model: 'offline', mode: 'harness' as const,
+      memory: {privateChat: true, list: async () => [], search: async () => [], remember: async () => {throw new Error('unused');}, forget: async () => false}};
+    try {
+      const host = await createHost(directory); hosts.push(host);
+      const backend = await hostModule('dsh-attachment-local');
+      await host.mount(backend.default ?? backend.LocalAttachmentStore, {dshHome: join(directory, 'home')});
+      const sharp = (await load('node_modules/sharp/dist/index.mjs')).default;
+      const bytes = await sharp({create: {width: 2, height: 2, channels: 4, background: '#3366ff'}}).png().toBuffer();
+      const session = await host.adapter.create(policy);
+      expect(await session.run('describe the image', new AbortController().signal, {images: [{data: bytes, mediaType: 'image/png'}]})).toBe('offline answer');
+      const agent = host.root.get('agents').get(session.id);
+      const messages = agent.session.snapshotEvents().filter((event: {type: string; data: {content?: Array<{type: string}>}}) => event.type === 'user/message'
+        && event.data.content?.some(part => part.type === 'image'));
+      expect(messages).toHaveLength(1);
+      const block = messages[0].data.content.find((part: {type: string}) => part.type === 'image');
+      expect(block.attachment).toMatchObject({mediaType: 'image/png', width: 2, height: 2});
+      expect(JSON.stringify(messages)).not.toContain(bytes.toString('base64'));
+      expect(JSON.stringify(host.requests)).toContain('describe the image');
+      await session.dispose(); await host.close();
+      const restored = await createHost(directory); hosts.push(restored);
+      await restored.mount(backend.default ?? backend.LocalAttachmentStore, {dshHome: join(directory, 'home')});
+      const resumed = await restored.adapter.resume(policy, session.id);
+      expect(await resumed.run('continue from this image', new AbortController().signal)).toBe('offline answer');
+      const reopened = restored.root.get('agents').get(resumed.id).session.snapshotEvents()
+        .filter((event: {type: string}) => event.type === 'user/message');
+      expect(reopened.some((event: {data: {content?: Array<{type: string; attachment?: unknown}>}}) => event.data.content?.some(part => part.type === 'image'
+        && JSON.stringify(part.attachment) === JSON.stringify(block.attachment)))).toBe(true);
+      expect((await restored.root.get('attachments').readImage(block.attachment)).data.byteLength).toBeGreaterThan(0);
+      expect(JSON.stringify(restored.requests)).toContain('"type":"image"');
+      await resumed.dispose();
+    } finally {for (const host of hosts.reverse()) await host.close(); await rm(directory, {recursive: true, force: true});}
+  });
 
   it('runs and restores real agents while isolating persona, tools, memory, and required cwd', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'lark-modern-'));

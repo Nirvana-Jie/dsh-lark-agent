@@ -1,13 +1,15 @@
 import {useEffect, useId, useState, type ReactNode} from 'react';
-import type {ConnectionPhase, ConnectionSnapshot} from '../onboarding/protocol.js';
+import type {AgentCatalog, ConnectionPhase, ConnectionSnapshot} from '../onboarding/protocol.js';
 import type {ConnectionApi} from './api.js';
 import {useConnection} from './use-connection.js';
+import {AgentSettings} from './AgentSettings.js';
 import pluginIcon from '../../assets/plugin-icon.png';
 import feishuLogo from '../../assets/feishu-logo.png';
 import harnessIcon from '../../assets/deepseek-harness-icon.png';
 
 /** `app` is the desktop App; `openPlugins` switches to its plugin list and reports whether it could. */
-export interface ConnectionCardProps {api: ConnectionApi; host?: {app: boolean; openPlugins?: () => boolean}}
+export interface ConnectionCardProps {api: ConnectionApi; host?: {app: boolean; openPlugins?: () => boolean}; embedded?: boolean;
+  catalog?: AgentCatalog; onSnapshot?: (snapshot: ConnectionSnapshot) => void}
 
 const UPGRADE_COMMAND = 'dsh plugin --profile web update dsh-lark-agent@latest';
 const UPGRADE_GUIDE = 'https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级';
@@ -45,6 +47,9 @@ function Steps({active}: {active: number}) {
     <li key={label} className={index < active ? 'done' : index === active ? 'active' : ''} aria-current={index === active ? 'step' : undefined}>
       <span aria-hidden="true">{index < active ? '✓' : index + 1}</span>{label}
     </li>)}</ol>;
+}
+function ConnectionDetails({compact, open, children}: {compact: boolean; open: boolean; children: ReactNode}) {
+  return compact ? <details className="lark-connection-details" open={open || undefined}><summary>权限、菜单与连接管理</summary>{children}</details> : <>{children}</>;
 }
 
 /**
@@ -98,7 +103,7 @@ function UpdateNotice({update, host, phase}: {update: {current: string; latest: 
 }
 
 /** The host is authoritative for every transition, including readiness and identity. */
-export function ConnectionCard({api, host}: ConnectionCardProps) {
+export function ConnectionCard({api, host, embedded = false, catalog, onSnapshot}: ConnectionCardProps) {
   const {snapshot, error, pending, profiles, refresh, mutate, loadProfiles} = useConnection(api);
   const [chooseExisting, setChooseExisting] = useState(false);
   const [selected, setSelected] = useState('');
@@ -116,6 +121,7 @@ export function ConnectionCard({api, host}: ConnectionCardProps) {
   const cancel = () => { setChooseExisting(false); setDisconnecting(false); void mutate('cancel'); };
 
   useEffect(() => { setCopyMessage(''); }, [snapshot?.pairing?.code]);
+  useEffect(() => {if (snapshot) onSnapshot?.(snapshot);}, [snapshot, onSnapshot]);
   useEffect(() => { if (phase !== 'connected' && phase !== 'paused') setDisconnecting(false); }, [phase]);
 
   const copyPairing = async () => {
@@ -146,7 +152,7 @@ export function ConnectionCard({api, host}: ConnectionCardProps) {
       <p className="lark-footnote">用飞书确认，无需手动整理配置。</p>
     </>;
     if (phase === 'creating' || phase === 'configuring' || phase === 'starting') return <>
-      <Steps active={phase === 'starting' ? 1 : 0} />
+      <Steps active={phase === 'starting' ? 2 : 0} />
       <div className="lark-loading-row"><span className="lark-spinner" aria-hidden="true" /><h3>{phase === 'creating' ? '正在准备扫码入口' : phase === 'starting' ? '正在连接你的助手' : '正在准备连接'}</h3></div>
       <p className="lark-copy">{snapshot.message || '检查完成后会自动继续。'}</p>
       {phase === 'configuring' && <ul className="lark-checks"><li>配置这个机器人</li><li>检查消息收发与互动回复</li><li>确认企业使用权限</li></ul>}
@@ -186,11 +192,14 @@ export function ConnectionCard({api, host}: ConnectionCardProps) {
       <div className="lark-actions"><button className="lark-quiet" disabled={disabled} onClick={cancel}>取消连接</button></div>
     </>;
     if (phase === 'connected' || phase === 'paused') return <>
-      <Steps active={3} /><BrandLink connected={phase === 'connected'} /><h3 className="lark-intro-title">{phase === 'paused' ? '已暂停飞书连接' : '可以在飞书找我了'}</h3>
-      <p className="lark-copy lark-centered">{phase === 'paused' ? <>暂停期间，我不会在飞书回复。<br />准备好了，随时恢复。</> : <>打开机器人的私聊，直接发消息。<br />我们可以接着聊。</>}</p>
-      <div className="lark-actions lark-center">{phase === 'paused' ? <button className="lark-primary" disabled={unavailable} onClick={() => void mutate('resume')}>恢复连接</button> : <>
+      {embedded ? <div className={`lark-connection-summary ${phase}`}><span className="lark-connection-dot" aria-hidden="true" /><div><strong>{phase === 'paused' ? '连接已暂停' : '连接运行正常'}</strong><p>{phase === 'paused' ? '修改设置后恢复连接，即可继续对话。' : '已确认本人，私聊消息会交给这个 Agent。'}</p></div></div> : <>
+        <Steps active={3} /><BrandLink connected={phase === 'connected'} /><h3 className="lark-intro-title">{phase === 'paused' ? '已暂停飞书连接' : '可以在飞书找我了'}</h3>
+        <p className="lark-copy lark-centered">{phase === 'paused' ? <>暂停期间，我不会在飞书回复。<br />准备好了，随时恢复。</> : <>打开机器人的私聊，直接发消息。<br />我们可以接着聊。</>}</p></>}
+      <div className={`lark-actions ${embedded ? '' : 'lark-center'}`}>{phase === 'paused' ? <button className="lark-primary" disabled={unavailable} onClick={() => void mutate('resume')}>恢复连接</button> : <>
         {snapshot.bot && <External className="lark-primary" url={snapshot.bot.url}>去飞书聊天</External>}<button className="lark-secondary" disabled={unavailable} onClick={() => void mutate('pause')}>暂停连接</button></>}</div>
-      <div className="lark-connected-row"><div><strong>{snapshot.bot?.name || '我的飞书助手'}</strong><p>{phase === 'paused' ? '连接已暂停' : '已确认本人 · 私聊已就绪'}</p></div><button className="lark-text-button" disabled={disabled} onClick={() => void mutate('recheck')}>检查连接</button></div>
+      {embedded && <button className="lark-text-button lark-recheck" disabled={disabled} onClick={() => void mutate('recheck')}>检查连接</button>}
+      {!embedded && <div className="lark-connected-row"><div><strong>{snapshot.bot?.name || '我的飞书助手'}</strong><p>{phase === 'paused' ? '连接已暂停' : '已确认本人 · 私聊已就绪'}</p></div><button className="lark-text-button" disabled={disabled} onClick={() => void mutate('recheck')}>检查连接</button></div>}
+      <ConnectionDetails compact={embedded} open={Boolean(snapshot.documentSetup || snapshot.menu || disconnecting)}>
       <div className="lark-connected-row"><div><strong>实时回复、文档与画板</strong><p>{snapshot.capabilities.documents ? '已启用 · 回复实时显示，私聊作品仅供本人查看' : '实时显示回复和思考过程，并把复杂方案整理成文档和图示'}</p></div>
         {!snapshot.capabilities.documents && !snapshot.documentSetup && <button className="lark-secondary" disabled={disabled} onClick={() => void mutate('enable-documents')}>补充默认权限</button>}</div>
       {snapshot.menu && <MenuNotice menu={snapshot.menu} phase={phase} />}
@@ -205,23 +214,26 @@ export function ConnectionCard({api, host}: ConnectionCardProps) {
       <details className="lark-advanced"><summary>更多使用方式</summary><p>需要在群里使用时，由管理员单独配置允许接入的群。个人信息默认只在本人私聊中使用。</p></details>
       <div className="lark-actions lark-spread"><span className="lark-caption">在熟悉的地方，继续对话。</span><button className="lark-quiet" disabled={disabled} onClick={() => setDisconnecting(true)}>断开连接</button></div>
       {disconnecting && <div className="lark-disconnect" role="group" aria-labelledby={`${labelId}-disconnect`}><p id={`${labelId}-disconnect`}>断开后，飞书会暂时无法联系到助手。</p><div className="lark-actions"><button className="lark-danger" disabled={disabled} onClick={() => void mutate('disconnect')}>确认断开</button><button className="lark-secondary" disabled={disabled} onClick={() => setDisconnecting(false)}>继续保持连接</button></div></div>}
+      </ConnectionDetails>
     </>;
     return <><div className="lark-state-icon warning" aria-hidden="true">!</div><h3>连接还没有完成</h3><p className="lark-copy">{snapshot.message || '请检查设置后重试。'}</p>
       <div className="lark-actions">{snapshot.action && <External url={snapshot.action.url}>{snapshot.action.label}</External>}<button className="lark-primary" disabled={unavailable} onClick={() => void mutate('recheck')}>重试连接</button><button className="lark-quiet" disabled={disabled} onClick={cancel}>返回起点</button></div></>;
   }
 
-  return <div className="dsh-lark-settings">
-    <header className="lark-heading"><h2>飞书</h2><p>在飞书里，直接和你的 dsh 助手对话。</p></header>
+  return <div className={`dsh-lark-settings ${embedded ? 'lark-detail-card' : ''}`}>
+    {!embedded && <header className="lark-heading"><h2>飞书 agent</h2><p>在飞书里，直接和你的 dsh 助手对话。</p></header>}
     <section className="lark-card" aria-labelledby={titleId}>
-      <div className="lark-card-header"><img className="lark-plugin-icon" src={pluginIcon} alt="" /><div><h2 id={titleId}>飞书助手</h2><p>{phase === 'connected' ? '在飞书，继续与你的助手交流' : '连接后，就能在飞书找到我'}</p></div>
+      <div className="lark-card-header"><img className="lark-plugin-icon" src={pluginIcon} alt="" /><div><h2 id={titleId}>{embedded ? snapshot?.agent?.label || snapshot?.bot?.name || '新的飞书助手' : '飞书助手'}</h2><p>{embedded ? '飞书机器人 · 仅本人私聊' : phase === 'connected' ? '在飞书，继续与你的助手交流' : '连接后，就能在飞书找到我'}</p></div>
         <span className={`lark-status ${phase === 'connected' ? 'online' : ''}`} role="status"><i aria-hidden="true" />{snapshot ? phaseLabels[phase] : '读取中'}</span></div>
       <div className="lark-body" aria-busy={disabled}>
         {error && <div className="lark-error" role="alert"><span>{error}</span><button className="lark-text-button" disabled={disabled} onClick={refresh}>重试</button></div>}
         {snapshot?.update && <UpdateNotice update={snapshot.update} host={host} phase={phase} />}
         {body()}
+        {embedded && snapshot?.agent && ['idle', 'connected', 'paused', 'error'].includes(phase) && <AgentSettings snapshot={snapshot} catalog={catalog} pending={disabled} now={now}
+          authorize={kind => void mutate('enable-input', {kind})} cancelAuthorization={() => void mutate('cancel-input')} recheck={() => void mutate('recheck')} save={settings => mutate('update-agent', settings)} />}
         {pending && <div className="lark-pending" role="status"><span className="lark-spinner" aria-hidden="true" />正在处理，请稍等…</div>}
       </div>
     </section>
-    <p className="lark-bottom-note">先确认是你本人，再开始对话。</p>
+    {!embedded && <p className="lark-bottom-note">先确认是你本人，再开始对话。</p>}
   </div>;
 }

@@ -1,7 +1,8 @@
 import type {ComponentType} from 'react';
 import {ConnectionApi, type ConnectionRpc} from './api.js';
-import {ConnectionCard, type ConnectionCardProps} from './ConnectionCard.js';
+import type {ConnectionCardProps} from './ConnectionCard.js';
 import {installStyles} from './styles.js';
+import {ManagerPanel} from './ManagerPanel.js';
 
 /** Minimal public services shared by the Web and official desktop hosts. */
 export interface ClientContext {
@@ -31,7 +32,8 @@ export function apply(ctx: ClientContext): void {
     } catch { return false; }
   };
   ctx.effect(installStyles, 'dsh-larkbot: connection styles');
-  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab', id: 'dsh-larkbot', order: 30, label: () => '飞书', inject: () => ({api, host: {app, openPlugins}}),
-  }, ConnectionCard));
+  const seat = app ? 'settings.section' : 'settings.plugins.tab';
+  ctx.slots.inject(seat, () => ctx.slots.register({
+    name: seat, id: 'dsh-larkbot', order: 40, label: () => '飞书 agent', inject: () => ({api, host: {app, openPlugins}}),
+  }, ManagerPanel));
 }

@@ -13,6 +13,15 @@ const result = (value: unknown) => ({ok: true, value});
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return {promise, resolve}; }
 
 describe('Feishu connection settings', () => {
+  it('shows starting after the owner step while completion is still pending', async () => {
+    const call = vi.fn<ConnectionRpc['call']>(async () => result(snapshot('starting', {bot, busy: true})));
+    render(<ConnectionCard api={new ConnectionApi({call})} embedded />);
+    await screen.findByRole('heading', {name: '正在连接你的助手'});
+    const progress = screen.getByRole('list', {name: '连接进度'});
+    expect(progress.querySelector('[aria-current="step"]')?.textContent).toContain('完成');
+    expect(progress.querySelectorAll('.done')).toHaveLength(2);
+    expect(screen.queryByRole('heading', {name: '可以在飞书找我了'})).toBeNull();
+  });
   it('shows incremental authorization in the connected card and cancels it without disconnecting', async () => {
     const call = vi.fn<ConnectionRpc['call']>(async (_channel, endpoint) => result(snapshot('connected', {bot,
       ...(endpoint === 'enable-documents' ? {documentSetup: {phase: 'scanning', message: '扫码补充授权', qr: {url: 'https://open.feishu.cn/verify', image: 'data:image/png;base64,YQ==', expiresAt: Date.now() + 60000}}} : {})})));
@@ -180,6 +189,8 @@ describe('Feishu connection settings', () => {
     apply(ctx);
     onTestFinished(() => { for (const off of cleanups.reverse()) off(); });
     const props = register.mock.calls[0]![0].inject();
+    expect(register.mock.calls[0]![0]).toMatchObject({name: 'settings.section', id: 'dsh-larkbot', order: 40});
+    expect(register.mock.calls[0]![0].label()).toBe('飞书 agent');
     expect(props.host?.app).toBe(true);
     expect(props.host?.openPlugins?.()).toBe(true);
     expect(openList).toHaveBeenCalledOnce();

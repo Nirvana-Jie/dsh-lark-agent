@@ -78,6 +78,10 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(executable) || !exi
       const before=calls.length;
       const forbidden=await router.fetch(request(),nonOwner);
       const nonOwnerCalls=calls.length-before;
+      const managementForbidden=[];
+      for(const endpoint of ['connections','add-connection','remove-connection','agent-catalog','update-agent','enable-input','cancel-input']) {
+        managementForbidden.push((await router.fetch(request(endpoint),nonOwner)).status);
+      }
       const untrustedOrigin=service.admit(request('status',{origin:'https://untrusted.example'}));
       authenticated=false;const unauthenticated=service.admit(request());authenticated=true;
       const accepted=service.admit(request());
@@ -95,7 +99,7 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(executable) || !exi
       try {await registerConnectionRpc(connection.rpc,controller,{register(route){if(++registered===2)throw Error('registration conflict');return connection.fetch.register(route);}});}
       catch {partialFailed=true;}
       const afterPartialFailure=await router.fetch(request(),owner);
-      process.stdout.write(JSON.stringify({forbidden:forbidden.status,nonOwnerCalls,untrustedOrigin:untrustedOrigin.rejection,unauthenticated:unauthenticated.rejection,success:success.status,body,methodMismatch:methodMismatch.status,mediaType:mediaType.status,oversize:oversize.status,invalidPayloadOk:invalidResult.result.ok,missing:missing.status,afterDispose:afterDispose.status,partialFailed,afterPartialFailure:afterPartialFailure.status,calls}));
+      process.stdout.write(JSON.stringify({forbidden:forbidden.status,nonOwnerCalls,managementForbidden,untrustedOrigin:untrustedOrigin.rejection,unauthenticated:unauthenticated.rejection,success:success.status,body,methodMismatch:methodMismatch.status,mediaType:mediaType.status,oversize:oversize.status,invalidPayloadOk:invalidResult.result.ok,missing:missing.status,afterDispose:afterDispose.status,partialFailed,afterPartialFailure:afterPartialFailure.status,calls}));
       await consumer.dispose();await provider.dispose();await server.dispose();
     `;
     const output = execFileSync(executable, ['--expose-internals', '--input-type=module', '-e', program], {
@@ -103,6 +107,7 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(executable) || !exi
     });
     expect(JSON.parse(output)).toEqual({
       forbidden: 403, nonOwnerCalls: 0, untrustedOrigin: 403, unauthenticated: 401, success: 200,
+      managementForbidden: [403, 403, 403, 403, 403, 403, 403],
       body: {type: 'server-response', rpcId: 'test-id', result: {ok: true, value: {phase: 'idle'}}},
       methodMismatch: 400, mediaType: 415, oversize: 413, invalidPayloadOk: false,
       missing: 404, afterDispose: 404, partialFailed: true, afterPartialFailure: 404, calls: ['status'],

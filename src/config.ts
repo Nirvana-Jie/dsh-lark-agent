@@ -13,6 +13,8 @@ export interface UserPolicy {
    * use the restricted assistant and allowedTools.
    */
   directMode: 'harness' | 'restricted';
+  /** Only new Harness sessions use this preset; restored sessions keep their recorded composition. */
+  agentPreset?: string;
 }
 
 export interface BotConfig {
@@ -39,6 +41,8 @@ export interface BotConfig {
   botMenu: boolean;
   /** Stream harness-mode private replies into a CardKit card (needs cardkit:card:write). */
   streamingCards: boolean;
+  imageInput?: boolean;
+  voiceInput?: boolean;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -76,11 +80,14 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
     const allowedTools = strings(user.allowedTools ?? [], 'user.allowedTools');
     if (allowedTools.some(t => !/^[a-zA-Z0-9_.:-]+$/.test(t) || t === 'run_code')) throw new Error('allowedTools requires exact tool names; run_code and wildcards are forbidden');
     if (user.directMode !== undefined && user.directMode !== 'harness' && user.directMode !== 'restricted') throw new Error('user.directMode must be harness or restricted');
+    if (user.agentPreset !== undefined && (typeof user.agentPreset !== 'string' || !user.agentPreset.trim() || user.agentPreset.length > 200
+      || /[\u0000-\u001f\u007f]/.test(user.agentPreset))) throw new Error('user.agentPreset must name an exact host preset');
     return {
       openId: id(user.openId, 'ou', 'user.openId'),
       direct: user.direct === true,
       groupChats: strings(user.groupChats ?? [], 'user.groupChats').map(v => id(v, 'oc', 'group chat')),
       cwd: resolve(cwd), allowedTools, directMode: user.directMode ?? 'restricted',
+      ...(user.agentPreset === undefined ? {} : {agentPreset: user.agentPreset as string}),
     };
   });
   if (new Set(users.map(u => u.openId)).size !== users.length) throw new Error('Duplicate user.openId');
@@ -89,6 +96,7 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
   if (data.loadingReaction !== undefined && typeof data.loadingReaction !== 'boolean') throw new Error('loadingReaction must be boolean');
   if (data.botMenu !== undefined && typeof data.botMenu !== 'boolean') throw new Error('botMenu must be boolean');
   if (data.streamingCards !== undefined && typeof data.streamingCards !== 'boolean') throw new Error('streamingCards must be boolean');
+  if (['imageInput', 'voiceInput'].some(key => data[key] !== undefined && typeof data[key] !== 'boolean')) throw new Error('Input switches must be boolean');
   return {
     profile, botOpenId: id(data.botOpenId, 'ou', 'botOpenId'),
     executable: string(data.executable ?? 'lark-cli', 'executable'),
@@ -111,6 +119,8 @@ export function parseConfig(value: unknown, baseDir = process.cwd()): BotConfig 
     loadingReaction: data.loadingReaction === true,
     botMenu: data.botMenu === true,
     streamingCards: data.streamingCards === true,
+    imageInput: data.imageInput !== false,
+    voiceInput: data.voiceInput === true,
   };
 }
 export async function loadConfig(path: string): Promise<BotConfig> {

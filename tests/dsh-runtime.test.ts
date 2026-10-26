@@ -1262,6 +1262,57 @@ describe('harness sessions use the host agent preset', () => {
     expect(presets.mount.mock.invocationCallOrder[0]!).toBeLessThan(f.prompt.section.mock.invocationCallOrder[0]!);
   });
 
+  it('records a robot-specific preset for new sessions, while restoration keeps its recorded preset', async () => {
+    const f = fixture(), presets = withPresets(f);
+    await f.runtime.create({...basePolicy, agentPreset: 'research', mode: 'harness', memory: ownerMemory()});
+    expect(presets.resolve).toHaveBeenCalledWith('research');
+    expect(f.create.mock.calls[0]![0].meta).toMatchObject({agentPreset: 'research'});
+    const restored = fixture(), recorded = withPresets(restored);
+    Object.assign(restored.session.header, {agentPreset: 'coder'});
+    await restored.runtime.resume({...basePolicy, agentPreset: 'research', mode: 'harness', memory: ownerMemory()}, '00000000-0000-4000-8000-000000000000');
+    expect(recorded.resolve).toHaveBeenCalledWith('coder');
+    expect(recorded.resolve).not.toHaveBeenCalledWith('research');
+  });
+
+  it('admits and persists native image references before submitting the user message', async () => {
+    const f = fixture();
+    const attachment = {id: 'attachment-fixture', mediaType: 'image/png', width: 1, height: 1};
+    const saveImages = vi.fn(async () => [attachment]);
+    const get = f.get.getMockImplementation()!;
+    f.get.mockImplementation(name => name === 'attachments' ? {saveImages} : get(name));
+    const session = await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    const image = {data: Buffer.from('binary-fixture'), mediaType: 'image/png' as const};
+    await session.run('请看图片', new AbortController().signal, {images: [image]});
+    expect(saveImages).toHaveBeenCalledWith([image]);
+    expect(f.agent.followup).toHaveBeenCalledWith(expect.objectContaining({content: [{type: 'text', text: '请看图片'}, {type: 'image', attachment}]}));
+    expect(saveImages.mock.invocationCallOrder[0]).toBeLessThan(f.agent.followup.mock.invocationCallOrder[0]!);
+    expect(JSON.stringify(f.agent.followup.mock.calls)).not.toContain('binary-fixture');
+  });
+
+  it('refuses a known text-only model without silently dropping its image', async () => {
+    const f = modelFixture(), saveImages = vi.fn();
+    const get = f.get.getMockImplementation()!;
+    f.get.mockImplementation(name => name === 'attachments' ? {saveImages} : get(name));
+    const resolve = f.llm.resolveModelInfo.getMockImplementation()!;
+    f.llm.resolveModelInfo.mockImplementation(async (provider, model) => ({...await resolve(provider, model), inputModalities: ['text']}));
+    const session = await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    await expect(session.run('图片', new AbortController().signal, {images: [{data: Buffer.from('image'), mediaType: 'image/png'}]})).rejects.toThrow('不支持图片输入');
+    expect(saveImages).not.toHaveBeenCalled(); expect(f.agent.followup).not.toHaveBeenCalled();
+  });
+
+  it('does not start a model turn after image persistence fails or after cancellation', async () => {
+    const f = fixture(), saveImages = vi.fn(async () => {throw new Error('PRIVATE_STORAGE_PATH');});
+    const get = f.get.getMockImplementation()!;
+    f.get.mockImplementation(name => name === 'attachments' ? {saveImages} : get(name));
+    const session = await f.runtime.create({...basePolicy, mode: 'harness', memory: ownerMemory()});
+    await expect(session.run('图片', new AbortController().signal, {images: [{data: Buffer.from('image'), mediaType: 'image/png'}]})).rejects.toThrow('宿主校验或保存');
+    expect(f.agent.followup).not.toHaveBeenCalled();
+    const aborter = new AbortController();
+    saveImages.mockImplementation(async () => {aborter.abort(); return [] as never;});
+    await expect(session.run('图片', aborter.signal, {images: [{data: Buffer.from('image'), mediaType: 'image/png'}]})).rejects.toThrow();
+    expect(f.agent.followup).not.toHaveBeenCalled();
+  });
+
   it('resumes on the recorded preset, and on the default when none was recorded, like the App', async () => {
     const recorded = fixture();
     const presets = withPresets(recorded);

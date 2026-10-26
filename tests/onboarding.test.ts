@@ -12,6 +12,7 @@ import {LockHeldError} from '../src/lock.js';
 import type {IncomingMessage} from '../src/message.js';
 import type {ConnectionEndpoint, ConnectionPhase} from '../src/onboarding/protocol.js';
 import {DOCUMENT_SCOPES, STREAMING_SCOPE} from '../src/rich-scopes.js';
+import {MEDIA_RESOURCE_SCOPE, SPEECH_SCOPE} from '../src/media-scopes.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (reason?: unknown) => void;
@@ -65,6 +66,56 @@ afterEach(async () => {
 });
 
 describe('connection controller lifecycle', () => {
+  it('authorizes media for the verified bot, reads back permissions and keeps its input choice unchanged', async () => {
+    const f = await fixture(baseRecord), gate = deferred<void>();
+    const enableInput = vi.fn<NonNullable<OnboardingDependencies['platform']['enableInput']>>(async (_profile, _kind, qr) => {
+      qr({url: 'https://open.feishu.cn/verify?code=fixture', expireIn: 300}); await gate.promise;
+    });
+    f.deps.platform.enableInput = enableInput;
+    await f.controller.initialize(); await phase(f.controller, 'connected');
+    await f.controller.command('enable-input', {kind: 'voice'}); await f.controller.command('enable-input', {kind: 'voice'});
+    await vi.waitFor(() => expect(f.controller.snapshot().inputSetup?.phase).toBe('scanning'));
+    expect(enableInput).toHaveBeenCalledOnce(); expect(enableInput.mock.calls[0]?.slice(0, 2)).toEqual(['test-bot', 'voice']);
+    expect(f.controller.snapshot().capabilities.voice).toBe(false); expect(f.service.stop).not.toHaveBeenCalled();
+    f.platform.inspect.mockResolvedValue(inspection({grantedScopes: [...BOT_SCOPES, MEDIA_RESOURCE_SCOPE, SPEECH_SCOPE]}));
+    gate.resolve(); await vi.waitFor(() => expect(f.controller.snapshot().capabilities.voice).toBe(true));
+    expect(f.controller.snapshot().inputSetup).toBeUndefined(); expect(f.controller.snapshot().agent?.voiceInput).toBe(false);
+    expect(f.deps.pair).not.toHaveBeenCalled(); expect(f.controller.snapshot().phase).toBe('connected');
+  });
+
+  it('rejects absent media permissions and cannot grant them by writing Agent settings', async () => {
+    const f = await fixture({...baseRecord, enabled: false});
+    await f.controller.initialize();
+    await f.controller.command('recheck', {});
+    await expect(f.controller.command('update-agent', {label: '', agentPreset: '', workspace: '', imageInput: true, voiceInput: true})).rejects.toThrow('语音权限');
+    expect(f.controller.snapshot().agent?.voiceInput).toBe(false);
+    f.platform.inspect.mockResolvedValue(inspection({grantedScopes: [...BOT_SCOPES, SPEECH_SCOPE]}));
+    await f.controller.command('recheck', {}); expect(f.controller.snapshot().capabilities.voice).toBe(false);
+  });
+
+  it('does not mark media ready on missing read-back, and cancellation ignores late QR results', async () => {
+    const f = await fixture(baseRecord), gate = deferred<void>(), image = deferred<string>();
+    f.deps.platform.enableInput = vi.fn(async (_profile, _kind, qr, signal) => {
+      qr({url: 'https://open.feishu.cn/verify', expireIn: 300}); signal.addEventListener('abort', () => gate.resolve()); await gate.promise;
+    });
+    await f.controller.initialize(); await phase(f.controller, 'connected'); f.deps.qr = () => image.promise;
+    await f.controller.command('enable-input', {kind: 'voice'}); await f.controller.command('cancel-input', {});
+    image.resolve('data:image/png;base64,YQ=='); await Promise.resolve();
+    expect(f.controller.snapshot().inputSetup).toBeUndefined(); expect(f.controller.snapshot().capabilities.voice).toBe(false);
+    expect(f.service.stop).not.toHaveBeenCalled();
+    await expect(f.controller.command('enable-input', {kind: 'arbitrary-scope'})).rejects.toThrow('输入');
+    await f.controller.command('enable-input', {kind: 'voice'});
+    await vi.waitFor(() => expect(f.controller.snapshot().inputSetup?.phase).toBe('error'));
+    expect(f.controller.snapshot().capabilities.voice).toBe(false);
+  });
+
+  it('refreshes media scope status on a running connection without stopping or pairing', async () => {
+    const f = await fixture(baseRecord);
+    await f.controller.initialize(); await phase(f.controller, 'connected');
+    f.platform.inspect.mockResolvedValue(inspection({grantedScopes: [...BOT_SCOPES, MEDIA_RESOURCE_SCOPE, SPEECH_SCOPE]}));
+    await f.controller.command('recheck', {}); expect(f.controller.snapshot().capabilities.voice).toBe(true);
+    expect(f.service.stop).not.toHaveBeenCalled(); expect(f.deps.pair).not.toHaveBeenCalled();
+  });
   it('upgrades document permissions in the existing connection and coalesces repeated clicks', async () => {
     const f = await fixture(baseRecord), gate = deferred<void>();
     const enableDocuments = vi.fn<NonNullable<OnboardingDependencies['platform']['enableDocuments']>>(async (_profile, qr) => {qr({url: 'https://open.feishu.cn/verify?code=fixture', expireIn: 300}); await gate.promise;});
