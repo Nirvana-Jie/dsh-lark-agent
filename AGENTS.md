@@ -29,7 +29,7 @@
 | 模型选择、思考深度与旧卡片冲突 | `src/model-controls.ts`、`src/model-preferences.ts`、`src/bridge.ts` | `model-controls-bridge`、`model-preferences`、`dsh-runtime-model-native` 测试 |
 | 飞书底部菜单、私聊定位 | `src/bot-menu.ts`、`src/direct-chats.ts`、`src/lark-cli.ts` | `bot-menu`、`direct-chats`、`model-controls-bridge`、`bot-service` 测试 |
 | 记忆可见性、群授权 | `src/memory-store.ts`、`src/bridge.ts` | `memory-store`、`memory-privacy` 测试 |
-| 会话目录、原生话题、去重、全局机器人租约 | `src/session-store.ts`、`src/topic-store.ts`、`src/bridge.ts`、`src/ledger.ts`、`src/lock.ts`、`src/bot-service.ts` | `session-store`、`topic-store`、`topic-bridge`、`state`、`index`、`onboarding` 测试 |
+| 会话目录、历史选择器、原生话题、去重、全局机器人租约 | `src/session-store.ts`、`src/session-controls.ts`、`src/topic-store.ts`、`src/bridge.ts`、`src/ledger.ts`、`src/lock.ts`、`src/bot-service.ts` | `session-store`、`session-controls`、`topic-store`、`topic-bridge`、`state`、`index`、`onboarding` 测试 |
 | CLI 传输、进度、卡片 | `src/lark-cli.ts`、`src/progress.ts`、`src/replies.ts`、`src/card-actions.ts` | 同名测试与 `rich-bridge` |
 | 私聊菜单加载与原地更新 | `src/command-feedback.ts`、`src/bridge.ts`、`src/lark-cli.ts` | `command-feedback`、`model-controls-bridge`、`lark-cli` 测试 |
 | 结构化作品、表单、云端图示与报告 | `src/presentation.ts`、`src/artifacts.ts`、`src/artifact-publisher.ts`、`src/rich-scopes.ts` | `presentation`、`artifacts`、`artifact-publisher`、`presentation-flow`；兼容矩阵里的原生展示工具 |

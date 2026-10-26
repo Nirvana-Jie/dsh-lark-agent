@@ -23,6 +23,7 @@ import type {PermissionPreferencesStore} from './permission-preferences.js';
 import type {ArtifactStore, ArtifactContext, SavedArtifact} from './artifacts.js';
 import type {ArtifactPublisher} from './artifact-publisher.js';
 import {TopicStoreError, type TopicStore, type TopicBinding, type TopicScope, type TopicReceipt} from './topic-store.js';
+import {sessionControlPanel, sessionPage, sessionQuery, sessionViewCommandParse, type SessionView} from './session-controls.js';
 
 export interface Runtime {
   create(policy: AgentPolicy): Promise<RuntimeSession>;
@@ -78,6 +79,7 @@ interface RoutedMessage extends IncomingMessage {
   conversationKey?: string;
   laneKey?: string;
   foreignTopic?: boolean;
+  sessionView?: SessionView;
 }
 interface ModelView {catalog: ModelCatalog; selection: ModelSelection; preference: ModelPreferenceRecord}
 class ArtifactDeliveryError extends Error {}
@@ -102,7 +104,7 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_TEXT = '本次处理超时，已请求取消。请缩小问题范围后重试。';
 const STOPPING_TEXT = '连接正在关闭，本次处理已停止。';
 // Clicks on these panels update the clicked card itself; anything else answers with a new message.
-const IN_PLACE = /^\/(?:(?:model|thinking)(?: (?:use [a-f0-9]{16}|page [0-9]{1,4}))?|permission(?: use [a-z][a-z0-9-]{0,39})?|sessions|new|resume [a-f0-9]{12})$/;
+const IN_PLACE = /^\/(?:(?:model|thinking)(?: (?:use [a-f0-9]{16}|page [0-9]{1,4}))?|permission(?: use [a-z][a-z0-9-]{0,39})?|sessions(?: page [1-9][0-9]?(?: [A-Za-z0-9_-]{1,428})?)?|new|resume [a-f0-9]{12})$/;
 // A switch that finishes sooner goes straight to its result, without a loading frame.
 const PANEL_PROGRESS_DELAY_MS = 150;
 const STALE_SETTINGS = '设置刚刚变化，已刷新为最新选项，请重新选择。';
@@ -154,7 +156,7 @@ const HELP = `直接把想做的事告诉我就好。
 
 比如：帮我理清一个问题、整理一段文字，或者接着刚才的话题继续。你也可以在私聊告诉我，以后希望我怎样配合你。
 
-私聊底部菜单可以新建话题、找历史对话，或调整模型和思考深度。
+私聊底部菜单可以新建话题、搜索和选择历史对话，或调整模型和思考深度。
 私聊和群聊的新问题都会开一个飞书话题；请在话题里继续，群聊中仍需 @我。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
 const HARNESS_HELP = `
@@ -162,7 +164,7 @@ const HARNESS_HELP = `
 这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或点底部菜单 设置 → 权限模式）可以切换权限，比如改成不再询问的「完全权限」。模型、思考深度和权限模式与电脑上的 Harness 同步。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：创建新的飞书话题，在新话题里开始；旧话题和长期记忆保留
-/sessions：选择以前的对话；/sessions detail 查看完整列表和 ID
+/sessions：搜索、翻页并选择以前的对话；/sessions detail 查看 ID，/sessions page <页码> 查看其他页
 /resume <ID>：打开列表中会话对应的话题，旧会话首次使用时补建话题入口
 /rename <标题>：给当前会话命名
 /status：看看我是否在线；/status detail 查看会话和记忆诊断
@@ -242,7 +244,7 @@ export class BotBridge {
     if (ordinary) return ordinary;
     if (!this.config.cardInteractions || !this.state.actions || !raw || typeof raw !== 'object' || Array.isArray(raw)) return;
     const data = raw as Record<string, unknown>;
-    if (data.type !== 'card.action.trigger' || data.action_tag !== 'button'
+    if (data.type !== 'card.action.trigger' || (data.action_tag !== 'button' && data.action_tag !== 'select_static')
       || typeof data.event_id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.event_id)
       || typeof data.message_id !== 'string' || !/^om_[a-zA-Z0-9_-]+$/.test(data.message_id)
       || typeof data.action_value !== 'string' || data.action_value.length > 4000) return;
@@ -255,18 +257,39 @@ export class BotBridge {
       this.audit({stage: 'card-action-rejected'});
       return;
     }
+    let command = binding.command;
+    let sessionView: SessionView | undefined;
+    const browser = sessionViewCommandParse(command);
+    if (data.action_tag === 'select_static') {
+      // A selector can only navigate this owner's catalog, never invoke another signed capability.
+      if (browser?.kind !== 'pick' || data.action_name !== 'dsh_session_picker'
+        || typeof data.option !== 'string' || !/^[a-f0-9]{12}$/.test(data.option)) return;
+      sessionView = browser.view;
+      command = `/resume ${data.option}`;
+    } else if (browser?.kind === 'pick') return;
+    else if (browser) sessionView = browser.view;
+    else if (command === '/sessions search') {
+      if (data.action_name !== 'dsh_sessions_search' || typeof data.form_value !== 'string' || data.form_value.length > 1000) return;
+      let fields: unknown;
+      try {fields = JSON.parse(data.form_value);} catch {return;}
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields) || Object.keys(fields).length !== 1 || !('query' in fields)) return;
+      const query = sessionQuery(fields.query);
+      if (query === undefined) return;
+      sessionView = {page: 0, query};
+      command = '/sessions';
+    }
     let formValues: unknown;
     if (binding.command.startsWith('/answer ') || binding.command.startsWith('/reply ')) {
       if (data.action_name !== 'dsh_submit' || typeof data.form_value !== 'string' || data.form_value.length > 8000) return;
       try {formValues = JSON.parse(data.form_value);} catch {return;}
       if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return;
     }
-    const mutation = /^\/(?:(?:new|resume|forget|answer)(?: |$)|(?:model|thinking|permission) use )/.test(binding.command);
+    const mutation = /^\/(?:(?:new|resume|forget|answer)(?: |$)|(?:model|thinking|permission) use )/.test(command);
     return {messageId: data.message_id, senderId: binding.ownerId, chatId: binding.chatId,
-      chatType: binding.chatType, threadId: binding.threadId, text: binding.command,
+      chatType: binding.chatType, threadId: binding.threadId, text: command,
       requestId: `card:${data.event_id}`, actionNonce: mutation ? binding.nonce : undefined,
       expectedSessionId: binding.expectedSessionId, expectedModelRevision: binding.expectedModelRevision,
-      ...(formValues === undefined ? {} : {formValues})};
+      ...(formValues === undefined ? {} : {formValues}), ...(sessionView ? {sessionView} : {})};
   }
 
   accept(raw: unknown): Promise<void> {
@@ -331,6 +354,8 @@ export class BotBridge {
         }
         message.foreignTopic = !message.topic && await this.state.topics!.occupied(this.topicScope(message).chatKey, message.threadId);
       }
+      // Recognized settings questions use the entry lane before any provisional topic context is allocated.
+      if (this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
       const startsTopic = this.topicsEnabled() && !message.threadId && !message.text.startsWith('/');
       const key = message.topic?.laneKey ?? (startsTopic ? this.newTopicKey(message) : sessionKey(message, this.config));
       if (startsTopic) message.conversationKey = key;
@@ -413,7 +438,6 @@ export class BotBridge {
       message.topic = undefined;
       message.conversationKey = this.entryKey(message);
     }
-    if (this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
     let text = message.text;
     const inPlace = this.inPlace(message);
     // A stale card is redrawn with the current state instead of answered with another message.
@@ -1081,9 +1105,11 @@ export class BotBridge {
     if (command === 'sessions') {
       const sessions = this.topicsEnabled() ? await this.topicSessions(message) : await this.state.sessions.list(conversation);
       const current = await this.state.sessions.current(conversation);
-      if (args !== 'detail') return sessions.length ? '你在这里聊过的话题：\n' + sessions.slice(0, 20)
-        .map(s => `${s.id === current?.id ? '正在聊 · ' : ''}${s.title}`).join('\n')
-        + '\n可以点卡片里的话题继续；没有按钮时，发送 /sessions detail 查看可用操作。'
+      const view = message.sessionView ?? sessionViewCommandParse(message.text)?.view ?? {page: 0, query: ''};
+      const page = sessionPage(sessions, view);
+      if (args !== 'detail') return sessions.length ? `当前聊天的话题（${page.total} 个${view.query ? '匹配' : ''}，第 ${page.view.page + 1}/${page.pages} 页）：\n` + page.items
+        .map(s => `${s.id === current?.id ? '正在聊 · ' : ''}${s.title}\n/resume ${s.id}`).join('\n')
+        + '\n可在卡片中搜索或选择话题。文字操作：/sessions page <页码>。'
         : '这里还没有以前的对话，直接开始聊就好。';
       return sessions.length ? `当前聊天的会话（${sessions.length} 个）：\n` + sessions.slice(0, 20).map(s => `${s.id}${s.id === current?.id ? ' [当前]' : ''} · ${s.title}`).join('\n')
         + (this.topicsEnabled() ? '\n用 /resume <ID> 打开对应话题；只显示你在当前聊天有权访问的历史。' : '\n用 /resume <ID> 切换；只显示你在当前聊天／话题的历史。') : '当前聊天／话题还没有保存的会话。';
@@ -1097,15 +1123,23 @@ export class BotBridge {
     if (command === 'resume') {
       if (!/^[a-f0-9]{12}$/.test(args)) return '用法：/resume <ID>；请从当前聊天的 /sessions 列表选择。';
       if (this.topicsEnabled()) {
-        const target = (await this.topicSessions(message)).find(session => session.id === args);
-        if (!target) return '在你当前的聊天中找不到这个会话。';
+        const sessions = await this.topicSessions(message);
+        const target = (message.sessionView ? sessionPage(sessions, message.sessionView).items : sessions).find(session => session.id === args);
+        if (!target) {
+          if (message.sessionView) throw new SessionStoreError('NOT_FOUND');
+          return '在你当前的聊天中找不到这个会话。';
+        }
         const binding = await this.continueTopic(message, target);
         message.topicResult = {binding, title: target.title};
         return this.topicNavigation(binding, target.title);
       }
       // Resolve authorization before touching the running handle or native log.
-      const target = (await this.state.sessions.list(conversation)).find(s => s.id === args);
-      if (!target) return '在你当前的聊天／话题中找不到这个会话。';
+      const sessions = await this.state.sessions.list(conversation);
+      const target = (message.sessionView ? sessionPage(sessions, message.sessionView).items : sessions).find(s => s.id === args);
+      if (!target) {
+        if (message.sessionView) throw new SessionStoreError('NOT_FOUND');
+        return '在你当前的聊天／话题中找不到这个会话。';
+      }
       if (!lane.unavailable && lane.session && lane.saved?.id === target.id) return `已经在会话「${target.title}」中。`;
       await this.unload(lane);
       const preference = await this.state.modelPreferences?.get(context);
@@ -1345,7 +1379,7 @@ export class BotBridge {
     card?: {pending?: boolean; error?: string; notice?: string}): Promise<ReplyPanel | undefined> {
     const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(message.text);
     const command = match?.[1]?.toLowerCase(), args = (match?.[2] ?? '').trim();
-    if (message.topicResult && !card?.pending && !card?.error && !card?.notice) {
+    if (message.topicResult && !message.sessionView && !card?.pending && !card?.error && !card?.notice) {
       const {binding, title} = message.topicResult;
       const text = this.topicNavigation(binding, title);
       return {title: '话题已就绪', tone: 'success', summary: `打开「${preview(title, 40)}」继续`,
@@ -1382,38 +1416,26 @@ export class BotBridge {
     }
     // Ordinary conversation and diagnostics stay out of management cards.
     // A card is useful here because the user explicitly wants to pick a topic.
-    const topic = card && (command === 'resume' || command === 'new');
+    const topic = (card || message.sessionView) && (command === 'resume' || command === 'new');
     if ((command !== 'sessions' || args === 'detail') && !topic) return;
     const conversation = this.sessionContext(message);
     const current = await this.state.sessions.current(conversation);
     const sessions = this.topicsEnabled() ? await this.topicSessions(message) : await this.state.sessions.list(conversation);
-    if (!sessions.length) return;
     const busy = Boolean(card?.pending);
     const target = command === 'resume' ? sessions.find(s => s.id === args) : undefined;
     const status: ReplyPanel['status'] = card?.error ? {text: card.error, tone: 'error'}
-      : busy ? {text: target ? `正在切换到「${preview(target.title, 40)}」…` : '正在开始新话题…', tone: 'pending'}
-      : topic && command === 'resume' && target ? {text: `已切换到「${preview(target.title, 40)}」，可以接着聊了。`, tone: 'success'}
+      : busy ? {text: target ? `正在打开「${preview(target.title, 40)}」…` : command === 'new' ? '正在开始新话题…' : '正在查找话题…', tone: 'pending'}
+      : card?.notice ? {text: card.notice}
+      : topic && command === 'resume' && target ? undefined
       : topic ? {text: '好，换个话题。直接发消息就会开始新的对话，之前的还在这里。', tone: 'success'}
-      : card?.notice ? {text: card.notice} : undefined;
-    const actions: ReplyAction[] = [];
-    const add = (label: string, command: string, options: {confirm?: ReplyAction['confirm']; expectedSessionId?: string | null} = {}) => {
-      if (busy) { actions.push({label, value: {}, disabled: true}); return; }
+      : undefined;
+    return sessionControlPanel(sessions.map(session => ({...session, ...('topic' in session && (session as TopicSession).topic?.link
+      ? {link: (session as TopicSession).topic!.link} : {})})), current?.id, (label, command): ReplyAction | undefined => {
       if (!interactive) return;
-      const token = this.state.actions!.issue({ownerId: message.senderId, chatId: message.chatId,
-        chatType: message.chatType, threadId: message.threadId, sourceMessageId: message.messageId,
-        command, ...(options.expectedSessionId === undefined ? {} : {expectedSessionId: options.expectedSessionId})});
-      actions.push({label, value: {token}, confirm: options.confirm});
-    };
-    for (const session of sessions.filter(s => s.id !== current?.id).slice(0, 5)) add(`继续 ${preview(session.title, 14)}`, `/resume ${session.id}`,
-      {expectedSessionId: current?.id ?? null, ...(this.topicsEnabled() ? {} : {confirm: {title: '接着这个话题聊？', text: `继续「${preview(session.title, 40)}」，现在的对话会保留。`}})});
-    if (current) add('换个话题', '/new', {expectedSessionId: current.id,
-      confirm: {title: '开始新话题？', text: '之前的对话会保留，需要时可以再找回来。'}});
-    return {title: '以前的对话', subtitle: '选一个话题，接着聊', tone: status?.tone ?? 'normal', ...(status ? {status} : {}),
-      summary: status?.text ?? '选择以前的话题继续，或开始一段新对话', actions,
-      sections: sessions.slice(0, 5).map(s => ({title: preview(s.title, 40), text: this.topicsEnabled() && 'topic' in s && (s as TopicSession).topic?.link
-        ? `[打开话题](${(s as TopicSession).topic!.link})${s.id === current?.id ? ' · 当前话题' : ''}` : s.id === current?.id ? '正在聊这个话题' : '可以接着聊'})),
-      ...(!interactive || sessions.length > 5 ? {note: '完整列表和更多操作：/sessions detail'} : {}),
-    };
+      if (busy) return {label, value: {}, disabled: true};
+      return {label, value: {token: issue(command, /^(?:\/new|\/sessions pick )/.test(command) ? {expectedSessionId: current?.id ?? null} : {})}};
+    }, {view: message.sessionView ?? sessionViewCommandParse(message.text)?.view,
+      selectedId: !card?.error && !card?.notice && !busy ? target?.id : undefined, busy, status});
   }
 
   private async reply(message: RoutedMessage, text: string, signal?: AbortSignal): Promise<void> {

@@ -14,6 +14,26 @@ import {CardActions} from '../src/card-actions.js';
 import {DirectChatsStore} from '../src/direct-chats.js';
 import {PermissionPreferencesStore} from '../src/permission-preferences.js';
 import {ModelPreferencesStore} from '../src/model-preferences.js';
+import type {ReplyPayload} from '../src/replies.js';
+import {modelChoiceKey} from '../src/model-controls.js';
+
+function component(payload: ReplyPayload, tag: string): Record<string, unknown> | undefined {
+  if (payload.kind !== 'card') return;
+  return (payload.card.body as {elements: Record<string, unknown>[]}).elements.find(item => item.tag === tag);
+}
+function controlToken(value: Record<string, unknown>): string {
+  return (value.behaviors as {value: {token: string}}[])[0]!.value.token;
+}
+function formControl(form: Record<string, unknown>, tag: string): Record<string, unknown> {
+  const visit = (value: unknown): Record<string, unknown> | undefined => {
+    if (!value || typeof value !== 'object') return;
+    const item = value as Record<string, unknown>;
+    return item.tag === tag ? item : Object.values(item).map(visit).find(Boolean);
+  };
+  const control = visit(form);
+  if (!control) throw new Error(`Expected ${tag} in form`);
+  return control;
+}
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -83,6 +103,133 @@ async function fixture() {
 }
 
 describe('one native Lark topic per session', () => {
+  it('answers model questions from the entry preference without allocating new topic preference records', async () => {
+    const h = await fixture();
+    const chosen = {provider: 'provider-b', model: 'model-b'};
+    const fallback = {provider: 'provider-a', model: 'model-a'};
+    h.runtime.catalog = vi.fn(async () => ({models: [
+      {...fallback, providerName: 'Provider A', name: 'Default Alpha'}, {...chosen, providerName: 'Provider B', name: 'Chosen Beta'},
+    ]}));
+    h.runtime.resolveModelSelection = vi.fn(async value => value ?? fallback);
+    await h.bridge.accept(h.event(`/model use ${modelChoiceKey(chosen)}`));
+    const save = vi.spyOn(h.state.modelPreferences, 'set');
+    for (const question of ['你是什么模型？', '当前模型？']) {
+      await h.bridge.accept(h.event(question));
+      expect(h.reply.mock.calls.at(-1)?.[1]).toContain('Chosen Beta');
+    }
+    expect(save).not.toHaveBeenCalled(); expect(h.openTopic).not.toHaveBeenCalled();
+    expect(h.create).not.toHaveBeenCalled(); expect(h.resume).not.toHaveBeenCalled();
+  });
+
+  it('pages a large history, searches beyond the first page, and opens a selection on the same private card', async () => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    const context = h.legacyContext();
+    const first = await h.state.sessions.add(context, randomUUID(), 'Find this older project');
+    for (let index = 1; index < 45; index++) await h.state.sessions.add(context, randomUUID(), `Recent task ${index}`);
+    const click = (token: string, extra: Record<string, unknown> = {}) => ({type: 'card.action.trigger', event_id: randomUUID(),
+      operator_id: 'ou_alice', chat_id: 'oc_alice', message_id: 'om_history_picker', action_tag: 'button', action_value: JSON.stringify({token}), ...extra});
+    await h.bridge.accept(h.event('/sessions'));
+    const initial = h.replyRich.mock.calls.at(-1)![1];
+    const select = component(initial, 'select_static')!;
+    expect(select.options).toHaveLength(20);
+    expect(JSON.stringify(select.options)).not.toContain(first.title);
+    const next = (initial.kind === 'card' ? JSON.stringify(initial.card) : '').match(/"token":"([^"]+)"/g)!
+      .map(item => JSON.parse(`{${item}}`).token as string).find(token => h.state.actions.verify(token)?.command === '/sessions page 2')!;
+    await h.bridge.accept(click(next));
+    const second = h.updateFeedback.mock.calls.at(-1)![1];
+    expect(component(second, 'select_static')?.options).toHaveLength(20);
+    expect(second.kind === 'card' && second.fallbackText).toContain('第 2 / 3 页');
+    const form = component(second, 'form')!;
+    const search = formControl(form, 'button');
+    await h.bridge.accept(click(controlToken(search), {action_name: 'dsh_sessions_search', form_value: JSON.stringify({query: 'OLDER PROJECT'})}));
+    const found = h.updateFeedback.mock.calls.at(-1)![1];
+    const picker = component(found, 'select_static')!;
+    expect(picker.options).toMatchObject([{value: first.id, text: {content: expect.stringContaining(first.title)}}]);
+    expect(found.kind === 'card' && found.fallbackText).toContain('第 1 / 1 页');
+    const selected = click(controlToken(picker), {action_tag: 'select_static', action_name: 'dsh_session_picker', option: first.id});
+    await h.bridge.accept(selected);
+    expect(h.openTopic).toHaveBeenCalledOnce(); expect(h.create).not.toHaveBeenCalled(); expect(h.resume).not.toHaveBeenCalled();
+    const result = h.updateFeedback.mock.calls.at(-1)![1];
+    expect(component(result, 'select_static')?.initial_option).toBe(first.id);
+    expect(result.kind === 'card' && result.fallbackText).toContain('打开话题继续');
+    expect(formControl(component(result, 'form')!, 'input').default_value).toBe('OLDER PROJECT');
+    const sent = h.replyRich.mock.calls.length;
+    await h.bridge.accept({...selected, event_id: randomUUID()});
+    expect(h.openTopic).toHaveBeenCalledOnce(); // a fresh event cannot reuse a consumed selection
+    expect(h.replyRich).toHaveBeenCalledTimes(sent);
+    expect(h.updateFeedback.mock.calls.every(([id]) => id === 'om_history_picker')).toBe(true);
+    await h.bridge.accept(click(controlToken(formControl(component(result, 'form')!, 'button')),
+      {action_name: 'dsh_sessions_search', form_value: JSON.stringify({query: ''})}));
+    const cleared = h.updateFeedback.mock.calls.at(-1)![1];
+    expect(component(cleared, 'select_static')?.options).toHaveLength(20);
+    expect(cleared.kind === 'card' && cleared.fallbackText).toContain('第 1 / 3 页');
+  });
+
+  it.each(['p2p', 'group'] as const)('reuses an existing topic chosen from the %s dropdown without opening a native session', async type => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    const make = type === 'group' ? h.group : h.event;
+    const first = make('An existing topic'); await h.bridge.accept(first);
+    const topic = (await h.topics(first))[0]!;
+    await h.bridge.accept(make('/sessions'));
+    const picker = component(h.replyRich.mock.calls.at(-1)![1], 'select_static')!;
+    await h.bridge.accept({type: 'card.action.trigger', event_id: randomUUID(), operator_id: 'ou_alice', chat_id: first.chat_id,
+      message_id: 'om_existing_history', action_tag: 'select_static', action_name: 'dsh_session_picker', option: topic.sessionId,
+      thread_id: 'omt_spoofed', action_value: JSON.stringify({token: controlToken(picker)})});
+    expect(h.create).toHaveBeenCalledOnce(); expect(h.openTopic).toHaveBeenCalledOnce(); expect(h.resume).not.toHaveBeenCalled();
+    const payload = type === 'p2p' ? h.updateFeedback.mock.calls.at(-1)![1] : h.replyRich.mock.calls.at(-1)![1];
+    expect(payload).toMatchObject({kind: 'card', fallbackText: expect.stringContaining(topic.link!)});
+    expect(component(payload, 'select_static')?.initial_option).toBe(topic.sessionId);
+    if (type === 'group') expect(h.updateFeedback).not.toHaveBeenCalled();
+  });
+
+  it('rejects forged dropdown actions, malformed searches and sessions outside the signed result page', async () => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    const own = await h.state.sessions.add(h.legacyContext(), randomUUID(), 'Visible task');
+    const foreign = await h.state.sessions.add(h.legacyContext(h.event('context', {chat_id: 'oc_other'})), randomUUID(), 'Other chat secret');
+    const pick = h.state.actions.issue({ownerId: 'ou_alice', chatId: 'oc_alice', chatType: 'p2p', threadId: '', sourceMessageId: 'om_source', command: '/sessions pick 1'});
+    const search = h.state.actions.issue({ownerId: 'ou_alice', chatId: 'oc_alice', chatType: 'p2p', threadId: '', sourceMessageId: 'om_source', command: '/sessions search'});
+    const click = (token: string, extra: Record<string, unknown> = {}) => ({type: 'card.action.trigger', event_id: randomUUID(),
+      operator_id: 'ou_alice', chat_id: 'oc_alice', message_id: 'om_history_picker', action_tag: 'select_static',
+      action_name: 'dsh_session_picker', option: own.id, action_value: JSON.stringify({token}), ...extra});
+    for (const extra of [{operator_id: 'ou_bob'}, {chat_id: 'oc_other'}, {action_name: 'wrong'}, {option: '/new'}, {action_tag: 'button'}]) {
+      await h.bridge.accept(click(pick, extra));
+    }
+    for (const value of [{query: 'x'.repeat(81)}, {query: '/new', extra: true}, {query: []}, {query: 'line\nbreak'}]) {
+      await h.bridge.accept(click(search, {action_tag: 'button', action_name: 'dsh_sessions_search', form_value: JSON.stringify(value)}));
+    }
+    expect(h.ledger.claim).not.toHaveBeenCalled();
+    await h.bridge.accept(click(pick, {option: foreign.id}));
+    expect(h.openTopic).not.toHaveBeenCalled(); expect(h.resume).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.updateFeedback.mock.calls)).not.toContain(foreign.title);
+    expect(h.updateFeedback.mock.calls.at(-1)?.[1]).toMatchObject({kind: 'card', fallbackText: expect.stringContaining('未找到')});
+    const narrowed = h.state.actions.issue({ownerId: 'ou_alice', chatId: 'oc_alice', chatType: 'p2p', threadId: '', sourceMessageId: 'om_source',
+      command: `/sessions pick 1 ${Buffer.from('not a match').toString('base64url')}`});
+    await h.bridge.accept(click(narrowed));
+    expect(h.openTopic).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps group selection in the signed owner scope and rejects a previous disclosure epoch', async () => {
+    const h = await fixture(); h.transport.replyRich = h.replyRich;
+    const privateContext = {...h.legacyContext(), privateChat: true};
+    const memory = await h.state.memories.add(privateContext, 'personal', 'Private background');
+    await h.state.memories.setGroupShared(privateContext, memory.id, true);
+    const original = h.group('Visible group task'); await h.bridge.accept(original);
+    const own = (await h.topics(original))[0]!;
+    await h.bridge.accept(h.event('Hidden private task'));
+    await h.bridge.accept(h.group('Hidden Bob task', {sender_id: 'ou_bob'}));
+    await h.bridge.accept(h.group('/sessions'));
+    const card = h.replyRich.mock.calls.at(-1)![1];
+    expect(JSON.stringify(card)).not.toContain('Hidden private task'); expect(JSON.stringify(card)).not.toContain('Hidden Bob task');
+    const picker = component(card, 'select_static')!;
+    await h.state.memories.setGroupShared(privateContext, memory.id, false);
+    const opened = h.openTopic.mock.calls.length;
+    await h.bridge.accept({type: 'card.action.trigger', event_id: randomUUID(), operator_id: 'ou_alice', chat_id: 'oc_group',
+      message_id: 'om_group_history', action_tag: 'select_static', action_name: 'dsh_session_picker', option: own.sessionId,
+      action_value: JSON.stringify({token: controlToken(picker)})});
+    expect(h.openTopic).toHaveBeenCalledTimes(opened); expect(h.resume).not.toHaveBeenCalled();
+    expect(h.updateFeedback).not.toHaveBeenCalled(); // groups retain the guarded reply path
+  });
+
   it.each(['p2p', 'group'] as const)('binds the first turn and immediate follow-ups to one %s session', async type => {
     const h = await fixture();
     const make = type === 'group' ? h.group : h.event;

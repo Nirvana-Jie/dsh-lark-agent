@@ -28,6 +28,9 @@ export interface ReplyPanel {
   sections: {title?: string; text: string; collapsible?: boolean}[];
   actions?: ReplyAction[];
   actionColumns?: 1 | 2 | 3;
+  /** Trusted catalog controls; option values and callbacks are supplied by the application. */
+  select?: {placeholder: string; options: {label: string; value: string}[]; value: Record<string, string>; initialOption?: string; disabled?: boolean};
+  search?: {query: string; value: Record<string, string>; disabled?: boolean};
   note?: string;
 }
 
@@ -202,7 +205,8 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
   const metrics = (panel.metrics ?? []).filter(metric => metric.label.trim() || metric.value.trim());
   const fallbackText = safePlainText([panel.title, panel.subtitle, panel.status?.text,
     ...metrics.map(metric => [`${metric.label}：${metric.value}`, metric.note].filter(Boolean).join('\n')),
-    ...panel.sections.map(section => [section.title, section.text].filter(Boolean).join('\n')), panel.note]
+    ...panel.sections.map(section => [section.title, section.text].filter(Boolean).join('\n')),
+    ...(panel.select?.options.map(option => `${option.label}\n/resume ${option.value}`) ?? []), panel.note]
     .filter(Boolean).join('\n\n'));
   const elements: Record<string, unknown>[] = [];
   const actions = panel.actions ?? [];
@@ -220,6 +224,21 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
       ], {background_style: 'grey', padding: '10px 12px 10px 12px'})),
     });
   }
+  if (panel.search) elements.push({tag: 'form', name: 'dsh_sessions_search_form', direction: 'vertical',
+    elements: [{tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '0px', columns: [column([
+      {tag: 'input', name: 'query', input_type: 'text', placeholder: title('搜索话题标题'), default_value: panel.search.query,
+        max_length: 80, width: 'fill', disabled: Boolean(panel.search.disabled)},
+    ]), column([
+      {tag: 'button', name: 'dsh_sessions_search', text: title('搜索'), type: 'default', width: 'default',
+        action_type: 'form_submit', form_action_type: 'submit', form_name: 'dsh_sessions_search_form',
+        disabled: Boolean(panel.search.disabled), behaviors: [{type: 'callback', value: {...panel.search.value}}]},
+    ], {width: 'auto'})]}]});
+  if (panel.select) elements.push({tag: 'select_static', name: 'dsh_session_picker', width: 'fill',
+    placeholder: title(panel.select.placeholder), disabled: Boolean(panel.select.disabled),
+    ...(panel.select.initialOption ? {initial_option: panel.select.initialOption} : {}),
+    options: panel.select.options.map(option => ({text: title(safePlainText(option.label)), value: option.value})),
+    behaviors: [{type: 'callback', value: {...panel.select.value}}],
+  });
   for (const section of panel.sections) {
     if (!section.text.trim() && !section.title?.trim()) continue;
     if (section.collapsible && section.text.trim()) {
