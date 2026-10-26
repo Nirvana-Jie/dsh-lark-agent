@@ -45,7 +45,7 @@ describe('confirmed native topic creation', () => {
     expect(calls[0]?.args).toEqual(['--profile', 'test-bot', 'api', 'POST', '/open-apis/im/v1/messages/om_source/reply',
       '--data', '-', '--as', 'bot', '--format', 'json']);
     expect(JSON.parse(calls[0]!.input)).toMatchObject({reply_in_thread: true, uuid: 'topic:open', msg_type: 'text'});
-    expect(JSON.parse(JSON.parse(calls[0]!.input).content).text).toMatch(/^#dsh-lark-agent\n/);
+    expect(JSON.parse(JSON.parse(calls[0]!.input).content).text).not.toContain('dsh-lark-agent');
     expect(calls[0]!.args.join(' ')).not.toContain('$(text)');
     expect(calls[1]?.args).toContain('+messages-mget');
   });
@@ -57,13 +57,15 @@ describe('confirmed native topic creation', () => {
     await cli.openTopic({chatId: 'oc_chat'}, 'new topic', {idempotencyKey: 'topic'});
     const root = JSON.parse(calls[0]!.input);
     expect(root).toMatchObject({receive_id: 'oc_chat', uuid: 'topic:root', msg_type: 'interactive'});
-    expect(JSON.parse(root.content)).toMatchObject({schema: '2.0', header: {title: {content: 'new topic'}, subtitle: {content: '#dsh-lark-agent'}}});
+    expect(JSON.parse(root.content)).toMatchObject({schema: '2.0', header: {title: {content: 'new topic'}}});
+    expect(JSON.parse(root.content).header.subtitle).toBeUndefined();
+    expect(root.content).not.toContain('dsh-lark-agent');
     expect(root.content).not.toContain('打开话题继续');
     expect(root.content).not.toContain('@机器人');
     expect(calls[0]?.args).toContain('{"receive_id_type":"chat_id"}');
     expect(calls[1]?.args).toContain('/open-apis/im/v1/messages/om_root/reply');
     expect(JSON.parse(calls[1]!.input).reply_in_thread).toBe(true);
-    expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).toMatch(/^#dsh-lark-agent · /);
+    expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).not.toContain('dsh-lark-agent');
     expect(calls).toHaveLength(3); // entry card, one threaded reply, optional read; no standalone confirmation
   });
 
@@ -72,7 +74,7 @@ describe('confirmed native topic creation', () => {
       receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
     await new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'Group topic', {idempotencyKey: 'topic', chatType: 'group', textOnly: true});
     const root = JSON.parse(calls[0]!.input);
-    expect(root.msg_type).toBe('text'); expect(JSON.parse(root.content).text).toMatch(/^#dsh-lark-agent\n/);
+    expect(root.msg_type).toBe('text'); expect(JSON.parse(root.content).text).not.toContain('dsh-lark-agent');
     expect(JSON.parse(root.content).text).toContain('每条消息仍需 @机器人');
     expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).toContain('@机器人');
   });
@@ -88,7 +90,8 @@ describe('confirmed native topic creation', () => {
     const calls = commands([receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
     await new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'topic group', {idempotencyKey: 'topic'});
     expect(calls).toHaveLength(2);
-    expect(JSON.parse(JSON.parse(calls[0]!.input).content).header.subtitle.content).toBe('#dsh-lark-agent');
+    expect(JSON.parse(JSON.parse(calls[0]!.input).content).header.subtitle).toBeUndefined();
+    expect(JSON.parse(calls[0]!.input).content).not.toContain('dsh-lark-agent');
     expect(calls[1]?.args).toContain('+messages-mget');
   });
 
