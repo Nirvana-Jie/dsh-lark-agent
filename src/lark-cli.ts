@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import {renderPanel, type ReplyPayload} from './replies.js';
 import {topicLink, type TopicReceipt} from './topic-store.js';
-import {topicEntryPanel} from './topic-cards.js';
+import {TOPIC_SOURCE_MARKER, topicEntryPanel} from './topic-cards.js';
 
 export type LarkEventKey = 'im.message.receive_v1' | 'card.action.trigger' | 'application.bot.menu_v6';
 
@@ -327,7 +327,7 @@ export class LarkCli {
       || !/^[A-Za-z0-9._:-]{1,45}$/.test(options?.idempotencyKey)
       || (options.chatType !== undefined && options.chatType !== 'p2p' && options.chatType !== 'group')
       || (options.textOnly !== undefined && typeof options.textOnly !== 'boolean')) throw new Error('Invalid Lark topic target.');
-    const text = `话题：${title}\n请在这个话题里继续。${options.chatType === 'group' ? '群聊中每条消息仍需 @机器人。' : ''}`;
+    const text = `${TOPIC_SOURCE_MARKER}\n话题：${title}\n请在这个话题里继续。${options.chatType === 'group' ? '群聊中每条消息仍需 @机器人。' : ''}`;
     const request = async (path: string, data: Record<string, unknown>, params?: string) => {
       const result = await this.executeJson(['api', 'POST', path, ...(params ? ['--params', params] : []),
         '--data', '-', '--as', 'bot', '--format', 'json'], JSON.stringify(data), 'reply', this.commandTimeoutMs);
@@ -348,7 +348,7 @@ export class LarkCli {
       anchor = receipt.message_id as string;
     }
     if (!receipt?.thread_id) receipt = await request(`/open-apis/im/v1/messages/${anchor}/reply`,
-      {msg_type: 'text', content: JSON.stringify({text: target.messageId ? text : `在这里发送消息继续。${options.chatType === 'group' ? '每条消息仍需 @机器人。' : ''}`}),
+      {msg_type: 'text', content: JSON.stringify({text: target.messageId ? text : `${TOPIC_SOURCE_MARKER} · 在这里发送消息继续。${options.chatType === 'group' ? '每条消息仍需 @机器人。' : ''}`}),
         reply_in_thread: true, uuid: `${options.idempotencyKey}:open`});
     if (typeof receipt.thread_id !== 'string' || !/^(?:om|omt)_[A-Za-z0-9_-]{1,256}$/.test(receipt.thread_id)) {
       throw new Error('Lark topic creation did not return a thread ID; delivery is unknown.');

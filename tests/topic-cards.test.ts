@@ -6,7 +6,7 @@ describe('the topic entry card', () => {
   it('makes the card the entry and uses the native thread reply affordance', () => {
     const payload = renderPanel(topicEntryPanel('新话题', 'p2p'));
     expect(payload).toMatchObject({kind: 'card', card: {schema: '2.0', header: {
-      title: {content: '新话题'}, subtitle: {content: 'dsh-lark-agent'},
+      title: {content: '新话题'}, subtitle: {content: '#dsh-lark-agent'},
     }}, fallbackText: expect.stringContaining('回复话题')});
     expect(JSON.stringify(payload)).not.toContain('话题已就绪');
     expect(JSON.stringify(payload)).not.toContain('打开话题继续');

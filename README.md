@@ -86,7 +86,7 @@ The connection's model check does not create a “飞书连接测试” conversa
 
 By default it answers only your own private chat. In that chat the assistant is your Harness itself: the tools it can use and the actions that need your confirmation follow the permission settings on your computer. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
 
-A new request in the main chat opens a topic; continue inside that topic to keep its context. Authorized group chats work the same way and still require an @mention on each message. `/new` opens another topic and keeps the earlier ones available.
+A new request in the main chat opens a topic; continue inside that topic to keep its context. Authorized group chats work the same way and still require an @mention on each message. `/new` opens another topic and keeps the earlier ones available. New topic openings carry the message-level source marker `#dsh-lark-agent`.
 
 ## Good to know
 
