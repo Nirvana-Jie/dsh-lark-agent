@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({clients: [] as Client[], release: vi.fn(), acce
 vi.mock('../src/lock.js', () => ({acquireLock: mocks.acquire}));
 vi.mock('../src/ledger.js', () => ({DiskLedger: {open: async () => ({})}}));
 vi.mock('../src/session-store.js', () => ({SessionStore: {open: async () => ({})}}));
+vi.mock('../src/topic-store.js', () => ({TopicStore: {open: async () => ({})}}));
 vi.mock('../src/memory-store.js', () => ({MemoryStore: {open: async () => ({})}}));
 vi.mock('../src/card-actions.js', () => ({CardActions: {open: async () => ({})}}));
 vi.mock('../src/direct-chats.js', () => ({DirectChatsStore: {open: mocks.directOpen}}));

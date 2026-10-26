@@ -28,6 +28,9 @@ export interface ReplyPanel {
   sections: {title?: string; text: string; collapsible?: boolean}[];
   actions?: ReplyAction[];
   actionColumns?: 1 | 2 | 3;
+  /** Trusted catalog controls; option values and callbacks are supplied by the application. */
+  select?: {placeholder: string; options: {label: string; value: string}[]; value: Record<string, string>; initialOption?: string; disabled?: boolean};
+  search?: {query: string; value: Record<string, string>; disabled?: boolean};
   note?: string;
 }
 
@@ -66,24 +69,35 @@ function externalUrl(value: string): boolean {
   } catch { return false; }
 }
 
-/** Turn unsupported links into visible inert text; preserve ordinary web links. */
+function escapeProse(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Lark takes Markdown hrefs literally: HTML escaping '&' changes their query keys. */
+function linkDestination(url: string): string {
+  return url.replace(/&(?=(?:#(?:x[0-9a-f]+|[0-9]+)|[a-z][a-z0-9]*;))/gi, '%26')
+    .replace(/["'`]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+}
+
+/** Escape prose and disable unsupported links while retaining safe HTTP(S) destinations. */
 function safeLinks(text: string): string {
   let result = '', cursor = 0;
   while (cursor < text.length) {
     const start = text.indexOf('](', cursor);
-    if (start < 0) return result + text.slice(cursor);
+    if (start < 0) return result + escapeProse(text.slice(cursor));
     let end = start + 2, depth = 1;
     for (; end < text.length; end++) {
       if (text[end] === '\\') { end++; continue; }
       if (text[end] === '(') depth++;
       if (text[end] === ')' && --depth === 0) break;
     }
-    if (end >= text.length) return result + text.slice(cursor);
+    if (end >= text.length) return result + escapeProse(text.slice(cursor));
     const destination = text.slice(start + 2, end).trim();
-    const url = destination.match(/^(<[^>]+>|\S+?)(?:\s+["'][\s\S]*["'])?$/)?.[1]?.replace(/^<|>$/g, '') ?? '';
-    result += text.slice(cursor, start) + (externalUrl(url)
-      ? text.slice(start, end + 1)
-      : `]（${destination}）`);
+    const parts = destination.match(/^(<[^>]+>|\S+?)(\s+["'][\s\S]*["'])?$/);
+    const url = parts?.[1]?.replace(/^<|>$/g, '') ?? '';
+    result += escapeProse(text.slice(cursor, start)) + (externalUrl(url)
+      ? `](${linkDestination(url)}${escapeProse(parts?.[2] ?? '')})`
+      : `]（${escapeProse(destination)}）`);
     cursor = end + 1;
   }
   return result;
@@ -93,11 +107,10 @@ function prose(text: string): string {
   let output = text
     .replace(/<(https?:\/\/[^<>\s]+)>/gi, (_match, url: string) => externalUrl(url) ? `[${url}](${url})` : url)
     .replace(/!\[/g, '[');
-  output = safeLinks(output);
   output = output.replace(/^( {0,3}\[[^\]\n]+\]):\s*(<?\S+>?)(.*)$/gm,
     (line, label: string, destination: string) => externalUrl(destination.replace(/^<|>$/g, '')) ? line : line.replace(`${label}:`, `${label}：`));
-  // Escape entities too, so an encoded <at> cannot become an active tag after decoding.
-  output = output.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Prose still escapes entities so encoded native tags cannot become active.
+  output = safeLinks(output);
   return output.replace(/^[ \t]*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?[ \t]*$/gm, line => {
     const cells = line.trim().replace(/^\||\|$/g, '').split('|');
     return `| ${cells.map(() => ':---').join(' | ')} |`;
@@ -192,7 +205,8 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
   const metrics = (panel.metrics ?? []).filter(metric => metric.label.trim() || metric.value.trim());
   const fallbackText = safePlainText([panel.title, panel.subtitle, panel.status?.text,
     ...metrics.map(metric => [`${metric.label}：${metric.value}`, metric.note].filter(Boolean).join('\n')),
-    ...panel.sections.map(section => [section.title, section.text].filter(Boolean).join('\n')), panel.note]
+    ...panel.sections.map(section => [section.title, section.text].filter(Boolean).join('\n')),
+    ...(panel.select?.options.map(option => `${option.label}\n/resume ${option.value}`) ?? []), panel.note]
     .filter(Boolean).join('\n\n'));
   const elements: Record<string, unknown>[] = [];
   const actions = panel.actions ?? [];
@@ -210,6 +224,21 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
       ], {background_style: 'grey', padding: '10px 12px 10px 12px'})),
     });
   }
+  if (panel.search) elements.push({tag: 'form', name: 'dsh_sessions_search_form', direction: 'vertical',
+    elements: [{tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '0px', columns: [column([
+      {tag: 'input', name: 'query', input_type: 'text', placeholder: title('搜索话题标题'), default_value: panel.search.query,
+        max_length: 80, width: 'fill', disabled: Boolean(panel.search.disabled)},
+    ]), column([
+      {tag: 'button', name: 'dsh_sessions_search', text: title('搜索'), type: 'default', width: 'default',
+        action_type: 'form_submit', form_action_type: 'submit', form_name: 'dsh_sessions_search_form',
+        disabled: Boolean(panel.search.disabled), behaviors: [{type: 'callback', value: {...panel.search.value}}]},
+    ], {width: 'auto'})]}]});
+  if (panel.select) elements.push({tag: 'select_static', name: 'dsh_session_picker', width: 'fill',
+    placeholder: title(panel.select.placeholder), disabled: Boolean(panel.select.disabled),
+    ...(panel.select.initialOption ? {initial_option: panel.select.initialOption} : {}),
+    options: panel.select.options.map(option => ({text: title(safePlainText(option.label)), value: option.value})),
+    behaviors: [{type: 'callback', value: {...panel.select.value}}],
+  });
   for (const section of panel.sections) {
     if (!section.text.trim() && !section.title?.trim()) continue;
     if (section.collapsible && section.text.trim()) {

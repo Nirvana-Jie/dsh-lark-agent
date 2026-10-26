@@ -58,15 +58,36 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
       }
       root.get('llm').registerAdapter(['offline'], new OfflineAdapter());
       await mount(loop.AgentLoop);
-      let adapter: InstanceType<typeof runtime.DshRuntime>;
+      let adapter: InstanceType<typeof runtime.DshRuntime>, ownerContext: unknown;
       await mount({inject: ['agents', 'tools', 'sessions', 'sessionPersistence', 'systemPrompt'],
-        apply(ctx: unknown) {adapter = new runtime.DshRuntime(ctx);}});
+        apply(ctx: unknown) {ownerContext = ctx; adapter = new runtime.DshRuntime(ctx);}});
       return {root, adapter: adapter!, requests, metadataReads, toolApi: tools, llmApi: llm, promptApi: prompts,
+        async checkConnection() {
+          const {checkConnectionModel} = await load('onboarding/model-check.js');
+          await checkConnectionModel(ownerContext, {provider: 'offline', model: 'plain'}, new AbortController().signal);
+        },
         nextRequest(action: (sessionId: string) => Promise<void>) {onRequest = action;},
         nextStream(chunks: unknown[]) {nextChunks = chunks;},
         symbols: cordis.symbols, persistenceApi: await module('dsh-session-persistence'),
         close: () => root.fiber.dispose()};
     }
+
+    it('checks connections without adding test conversations to real native persistence', async () => {
+      const directory = await mkdtemp(join(tmpdir(), `lark-model-check-${family}-`)), host = await createHost(directory);
+      try {
+        const conversation = await host.adapter.create({cwd: directory, allowedTools: [], provider: 'offline', model: 'plain'});
+        await conversation.run('keep this real conversation', new AbortController().signal);
+        await conversation.dispose();
+        const before = await host.root.get('sessionPersistence').list();
+        expect(before).toHaveLength(1);
+        expect(JSON.stringify(before)).toContain(conversation.id);
+        await host.checkConnection();
+        await host.checkConnection();
+        expect(await host.root.get('sessionPersistence').list()).toEqual(before);
+        expect(host.root.get('sessions').list()).toEqual([]);
+        expect(host.requests.slice(-2).every(request => request.sessionId === undefined)).toBe(true);
+      } finally {await host.close(); await rm(directory, {recursive: true, force: true});}
+    });
 
     it('runs the owner chat as a harness channel with host persona, open tools and live reasoning', async () => {
       const directory = await mkdtemp(join(tmpdir(), `lark-harness-${family}-`)), host = await createHost(directory);

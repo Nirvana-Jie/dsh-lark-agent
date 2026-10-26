@@ -5,13 +5,14 @@ import {constants, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {delimiter, join, resolve} from 'node:path';
 import {createBotService, BotServiceStartError, type BotService} from '../bot-service.js';
-import {checkRuntimeCompatibility, DshRuntime} from '../dsh-runtime.js';
+import {checkRuntimeCompatibility} from '../dsh-runtime.js';
 import {acquireLock, LockHeldError} from '../lock.js';
 import {ConnectionController, SetupError} from './controller.js';
 import {ConnectionStore} from './store.js';
 import {LarkPlatform} from './lark-platform.js';
 import type {ConnectionEndpoint, ConnectionResult, ConnectionSnapshot} from './protocol.js';
 import {npmLatest, type Release, UpdateCheck} from './updates.js';
+import {checkConnectionModel} from './model-check.js';
 
 interface Peer {principal?: {kind?: string}}
 interface RpcHost {
@@ -192,17 +193,7 @@ export async function applyOnboarding(ctx: Context, options: {dataDir?: string; 
   const executable = await findLarkExecutable(options.executable);
   const controller = new ConnectionController({store: new ConnectionStore(directory), platform: new LarkPlatform({executable}), executable,
     checkRuntime: () => requireRuntime(ctx),
-    preflight: async (config, signal) => {
-      const policy = config.users[0]!;
-      const timeout = AbortSignal.timeout(45_000);
-      const combined = AbortSignal.any([signal, timeout]);
-      const session = await new DshRuntime(ctx).create({...policy, provider: config.provider, model: config.model});
-      try {
-        const result = await session.run('这是飞书连接测试，请只回复“连接成功”。', combined);
-        if (!(typeof result === 'string' ? result : result.text).trim()) throw new SetupError('模型没有返回内容，请检查模型设置后重试。');
-        await session.checkpoint();
-      } finally {await session.dispose();}
-    },
+    preflight: (config, signal) => checkConnectionModel(ctx, config, signal),
     start: async (config, signal, health, pairedChat) => {
       signal.throwIfAborted();
       const service = await createBotService(ctx, config, health, {directChat: pairedChat});

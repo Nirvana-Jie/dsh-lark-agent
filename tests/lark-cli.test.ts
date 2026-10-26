@@ -14,6 +14,114 @@ class FakeChild extends EventEmitter {
   close(code: number | null = 0) { this.emit('close', code, null); }
 }
 
+describe('confirmed native topic creation', () => {
+  afterEach(() => {vi.mocked(spawn).mockReset();});
+  function commands(results: unknown[]) {
+    const calls: Array<{args: string[]; input: string}> = [];
+    vi.mocked(spawn).mockReset().mockImplementation((_file, args) => {
+      const child = new FakeChild();
+      const call = {args: args as string[], input: ''}; calls.push(call);
+      const output = results.shift();
+      child.stdin.on('data', chunk => {call.input += chunk.toString();});
+      child.stdin.on('finish', () => {
+        queueMicrotask(() => {
+          child.stdout.write(typeof output === 'string' ? output : JSON.stringify(output));
+          child.close();
+        });
+      });
+      return child as unknown as ReturnType<typeof spawn>;
+    });
+    return calls;
+  }
+  const receipt = (data: Record<string, unknown>) => ({ok: true, identity: 'bot', data});
+  const readLink = receipt({messages: [{message_id: 'om_open',
+    thread_app_link: 'https://applink.feishu.cn/client/thread/open?threadId=omt_example'}]});
+
+  it('uses a raw thread reply and validates the bot receipt before returning a binding', async () => {
+    const calls = commands([receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
+    const cli = new LarkCli({profile: 'test-bot'});
+    expect(await cli.openTopic({chatId: 'oc_chat', messageId: 'om_source'}, 'a `$(text)` title', {idempotencyKey: 'topic'}))
+      .toEqual({messageId: 'om_open', threadId: 'omt_example', link: 'https://applink.feishu.cn/client/thread/open?threadId=omt_example'});
+    expect(calls[0]?.args).toEqual(['--profile', 'test-bot', 'api', 'POST', '/open-apis/im/v1/messages/om_source/reply',
+      '--data', '-', '--as', 'bot', '--format', 'json']);
+    expect(JSON.parse(calls[0]!.input)).toMatchObject({reply_in_thread: true, uuid: 'topic:open', msg_type: 'text'});
+    expect(JSON.parse(JSON.parse(calls[0]!.input).content).text).not.toContain('dsh-lark-agent');
+    expect(calls[0]!.args.join(' ')).not.toContain('$(text)');
+    expect(calls[1]?.args).toContain('+messages-mget');
+  });
+
+  it('creates a sibling root for menu/card events, then opens the confirmed root as a topic', async () => {
+    const calls = commands([receipt({message_id: 'om_root', chat_id: 'oc_chat'}),
+      receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
+    const cli = new LarkCli({profile: 'test-bot'});
+    await cli.openTopic({chatId: 'oc_chat'}, 'new topic', {idempotencyKey: 'topic'});
+    const root = JSON.parse(calls[0]!.input);
+    expect(root).toMatchObject({receive_id: 'oc_chat', uuid: 'topic:root', msg_type: 'interactive'});
+    expect(JSON.parse(root.content)).toMatchObject({schema: '2.0', header: {title: {content: 'new topic'}}});
+    expect(JSON.parse(root.content).header.subtitle).toBeUndefined();
+    expect(root.content).not.toContain('dsh-lark-agent');
+    expect(root.content).not.toContain('打开话题继续');
+    expect(root.content).not.toContain('@机器人');
+    expect(calls[0]?.args).toContain('{"receive_id_type":"chat_id"}');
+    expect(calls[1]?.args).toContain('/open-apis/im/v1/messages/om_root/reply');
+    expect(JSON.parse(calls[1]!.input).reply_in_thread).toBe(true);
+    expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).not.toContain('dsh-lark-agent');
+    expect(calls).toHaveLength(3); // entry card, one threaded reply, optional read; no standalone confirmation
+  });
+
+  it('preserves explicit text compatibility and the group mention requirement', async () => {
+    const calls = commands([receipt({message_id: 'om_root', chat_id: 'oc_chat'}),
+      receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
+    await new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'Group topic', {idempotencyKey: 'topic', chatType: 'group', textOnly: true});
+    const root = JSON.parse(calls[0]!.input);
+    expect(root.msg_type).toBe('text'); expect(JSON.parse(root.content).text).not.toContain('dsh-lark-agent');
+    expect(JSON.parse(root.content).text).toContain('每条消息仍需 @机器人');
+    expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).toContain('@机器人');
+  });
+
+  it('stops after an unknown opening reply, preserving the already sent entry without retrying it', async () => {
+    const calls = commands([receipt({message_id: 'om_root', chat_id: 'oc_chat'}), '{invalid']);
+    await expect(new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'New topic', {idempotencyKey: 'topic'})).rejects.toThrow();
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(calls[0]!.input).msg_type).toBe('interactive');
+  });
+
+  it('accepts an already threaded root without sending another opening reply', async () => {
+    const calls = commands([receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
+    await new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'topic group', {idempotencyKey: 'topic'});
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(JSON.parse(calls[0]!.input).content).header.subtitle).toBeUndefined();
+    expect(JSON.parse(calls[0]!.input).content).not.toContain('dsh-lark-agent');
+    expect(calls[1]?.args).toContain('+messages-mget');
+  });
+
+  it.each([
+    '{invalid',
+    {ok: false},
+    {ok: true, identity: 'user', data: {message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}},
+    receipt({message_id: 'om_open', chat_id: 'oc_other', thread_id: 'omt_example'}),
+    receipt({message_id: 'om_open', chat_id: 'oc_chat'}),
+    receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'bad/id'}),
+  ])('does not retry or read links after an unknown thread reply: %j', async output => {
+    const calls = commands([output]);
+    await expect(new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat', messageId: 'om_source'}, 'title', {idempotencyKey: 'topic'})).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('does not reply to a new root whose creation was not confirmed', async () => {
+    const calls = commands(['invalid JSON']);
+    await expect(new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat'}, 'title', {idempotencyKey: 'topic'})).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('keeps the confirmed topic when optional link enrichment is unavailable', async () => {
+    const calls = commands([receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), '{invalid']);
+    expect(await new LarkCli({profile: 'test-bot'}).openTopic({chatId: 'oc_chat', messageId: 'om_source'}, 'title', {idempotencyKey: 'topic'}))
+      .toEqual({messageId: 'om_open', threadId: 'omt_example'});
+    expect(calls).toHaveLength(2);
+  });
+});
+
 const ready = '[event] ready event_key=im.message.receive_v1\n';
 
 describe('LarkCli subprocess transport', () => {

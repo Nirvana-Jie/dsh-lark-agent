@@ -2,6 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
+import {sessionViewCommandParse} from './session-controls.js';
 
 export interface ActionBinding {
   ownerId: string;
@@ -56,7 +57,8 @@ function binding(value: unknown): ActionBinding | undefined {
     || (value.chatType !== 'p2p' && value.chatType !== 'group')
     || !(value.threadId === '' || validId(value.threadId, 'om') || validId(value.threadId, 'omt'))
     || !(validId(value.sourceMessageId, 'om') || (typeof value.sourceMessageId === 'string' && /^menu:[a-zA-Z0-9_-]{1,128}$/.test(value.sourceMessageId)))
-    || typeof value.command !== 'string' || /[\u0000-\u001f\u007f]/.test(value.command) || !COMMAND.test(value.command)
+    || typeof value.command !== 'string' || /[\u0000-\u001f\u007f]/.test(value.command)
+    || !(COMMAND.test(value.command) || value.command === '/sessions search' || sessionViewCommandParse(value.command))
     || !(value.expectedSessionId === undefined || value.expectedSessionId === null
       || (typeof value.expectedSessionId === 'string' && value.expectedSessionId.length === 12 && HEX_ID.test(value.expectedSessionId)))
     || !(value.expectedModelRevision === undefined || value.expectedModelRevision === null

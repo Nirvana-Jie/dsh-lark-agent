@@ -157,8 +157,12 @@ describe('rich command replies and signed card callbacks', () => {
     await h.bridge.accept(event('/sessions'));
     expect(h.latest().kind).toBe('card');
     expect(payloadText(h.latest())).toContain('Plan for tomorrow');
-    expect(payloadText(h.latest())).not.toContain(saved.id);
-    expect(JSON.stringify(h.latest())).not.toContain(saved.id);
+    expect(payloadText(h.latest())).toContain(`/resume ${saved.id}`); // usable text fallback
+    const payload = h.latest();
+    if (payload.kind !== 'card') throw new Error('Expected card');
+    const elements = (payload.card.body as {elements: Record<string, unknown>[]}).elements;
+    expect(elements.find(item => item.tag === 'select_static')?.options).toMatchObject([{value: saved.id,
+      text: {tag: 'plain_text', content: expect.stringContaining('Plan for tomorrow')}}]);
     expect(JSON.stringify(h.latest())).not.toContain(saved.nativeId);
     expect(actionTokens(h.latest()).length).toBeGreaterThan(0);
     expect(h.reply).not.toHaveBeenCalled();
@@ -267,8 +271,9 @@ describe('rich command replies and signed card callbacks', () => {
     await h.sessions.archive(original);
     const siblingSaved = await h.sessions.add(sibling, randomUUID(), 'Sibling thread');
     await h.bridge.accept(source);
-    const token = h.button(`/resume ${saved.id}`);
-    await h.bridge.accept(callback(token, {chat_id: 'oc_group', thread_id: 'omt_sibling', chat_type: 'p2p'}));
+    const token = h.button('/sessions pick 1');
+    await h.bridge.accept(callback(token, {action_tag: 'select_static', action_name: 'dsh_session_picker', option: saved.id,
+      chat_id: 'oc_group', thread_id: 'omt_sibling', chat_type: 'p2p'}));
     expect((await h.sessions.current(original))?.id).toBe(saved.id);
     expect((await h.sessions.current(sibling))?.id).toBe(siblingSaved.id);
     expect(h.runtime.resume.mock.calls[0]?.[1]).toBe(saved.nativeId);
@@ -361,11 +366,11 @@ describe('rich command replies and signed card callbacks', () => {
     const target = await h.sessions.add(h.context(), randomUUID(), 'Old conversation');
     const previous = await h.sessions.add(h.context(), randomUUID(), 'Current at render time');
     await h.bridge.accept(event('/sessions'));
-    const token = h.button(command === '/new' ? '/new' : `/resume ${target.id}`);
+    const token = h.button(command === '/new' ? '/new' : '/sessions pick 1');
     expect(h.actions.verify(token)?.expectedSessionId).toBe(previous.id);
     const current = await h.sessions.add(h.context(), randomUUID(), 'Changed since rendering');
     const archive = vi.spyOn(h.sessions, 'archive');
-    await h.bridge.accept(callback(token));
+    await h.bridge.accept(callback(token, command === '/resume' ? {action_tag: 'select_static', action_name: 'dsh_session_picker', option: target.id} : {}));
     expect((await h.sessions.current(h.context()))?.id).toBe(current.id);
     expect(archive).not.toHaveBeenCalled();
     expect(h.runtime.resume).not.toHaveBeenCalled();

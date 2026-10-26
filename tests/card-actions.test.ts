@@ -30,6 +30,17 @@ afterEach(async () => {
 });
 
 describe('signed card actions', () => {
+  it('signs bounded session browsing and search actions without granting arbitrary commands', async () => {
+    const actions = await CardActions.open(await temporary(), namespace);
+    for (const command of ['/sessions search', '/sessions pick 1', `/sessions page 2 ${Buffer.from('项目规划').toString('base64url')}`]) {
+      expect(actions.verify(actions.issue({...sample, command}))?.command).toBe(command);
+    }
+    for (const command of ['/sessions pick 0', '/sessions page 01', '/sessions pick 100', '/sessions search anything',
+      '/sessions page 1 _w', '/sessions page 1 YQo', '/sessions pick 1 YQ==']) {
+      expect(() => actions.issue({...sample, command})).toThrow('Invalid card action binding');
+    }
+  });
+
   it('accepts the same underscore and hyphen IDs as message routing', async () => {
     const actions = await CardActions.open(await temporary(), namespace);
     const bound = {...sample, ownerId: 'ou_alice_1', chatId: 'oc_team-1', threadId: 'omt_topic_1', sourceMessageId: 'om_source-1'};

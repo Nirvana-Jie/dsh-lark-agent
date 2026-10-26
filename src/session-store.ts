@@ -5,6 +5,8 @@ import { join } from 'node:path';
 export interface SessionContext {
   ownerKey: string;
   conversationKey: string;
+  /** A topic may point at one historical session without changing its siblings' active selection. */
+  sessionId?: string;
 }
 
 export interface SavedSession {
@@ -57,7 +59,8 @@ function validKey(value: unknown): value is string {
 }
 
 function validateContext(value: SessionContext): void {
-  if (!value || !validKey(value.ownerKey) || !validKey(value.conversationKey)) throw new SessionStoreError('INVALID_INPUT');
+  if (!value || !validKey(value.ownerKey) || !validKey(value.conversationKey)
+    || (value.sessionId !== undefined && (typeof value.sessionId !== 'string' || !SESSION_ID.test(value.sessionId)))) throw new SessionStoreError('INVALID_INPUT');
 }
 
 function titleText(value: unknown): string {
@@ -186,7 +189,7 @@ export class SessionStore {
 
   private mutate<T>(context: SessionContext, update: (draft: StoreDocument) => {value: T; changed: boolean}): Promise<T> {
     // Snapshot caller-owned identity before an earlier queued mutation awaits I/O.
-    const identity = {ownerKey: context?.ownerKey, conversationKey: context?.conversationKey};
+    const identity = {...context};
     const job = this.tail.then(async () => {
       this.assertAvailable();
       validateContext(identity);
@@ -208,7 +211,8 @@ export class SessionStore {
     await this.tail;
     this.assertAvailable();
     const entry = this.locate(this.document, identity);
-    const current = entry?.sessions.find(session => session.id === entry.activeId);
+    const current = entry?.sessions.find(session => session.id === (identity.sessionId ?? entry.activeId));
+    if (identity.sessionId && !current) throw new SessionStoreError('NOT_FOUND');
     return current && {...current};
   }
 
@@ -224,6 +228,7 @@ export class SessionStore {
   add(context: SessionContext, nativeId: string, title = '新会话'): Promise<SavedSession> {
     const identity = {...context};
     return this.mutate(identity, draft => {
+      if (identity.sessionId !== undefined) throw new SessionStoreError('INVALID_INPUT');
       if (!NATIVE_ID.test(nativeId)) throw new SessionStoreError('INVALID_INPUT');
       const safeTitle = titleText(title);
       let entry = this.locate(draft, identity);
@@ -236,7 +241,7 @@ export class SessionStore {
       do { id = randomBytes(6).toString('hex'); } while (usedIds.has(id));
       const time = this.nextTimestamp(draft);
       const session: SavedSession = {id, nativeId, title: safeTitle, createdAt: time, updatedAt: time};
-      if (!entry) { entry = {...identity, activeId: null, sessions: []}; draft.contexts.push(entry); }
+      if (!entry) { entry = {ownerKey: identity.ownerKey, conversationKey: identity.conversationKey, activeId: null, sessions: []}; draft.contexts.push(entry); }
       entry.sessions.push(session);
       entry.activeId = id;
       return {value: session, changed: true};
@@ -279,8 +284,8 @@ export class SessionStore {
     const identity = {...context};
     return this.mutate(identity, draft => {
       const entry = this.locate(draft, identity);
-      const changed = Boolean(entry?.activeId);
-      if (entry) entry.activeId = null;
+      const changed = Boolean(entry?.activeId && (!identity.sessionId || identity.sessionId === entry.activeId));
+      if (entry && changed) entry.activeId = null;
       return {value: undefined, changed};
     });
   }
@@ -290,7 +295,7 @@ export class SessionStore {
     return this.mutate(identity, draft => {
       const safeTitle = titleText(title);
       const entry = this.locate(draft, identity);
-      const session = entry?.sessions.find(candidate => candidate.id === entry.activeId);
+      const session = entry?.sessions.find(candidate => candidate.id === (identity.sessionId ?? entry.activeId));
       if (!session) throw new SessionStoreError('NO_CURRENT');
       session.title = safeTitle;
       session.updatedAt = this.nextTimestamp(draft);

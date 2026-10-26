@@ -29,6 +29,21 @@ afterEach(async () => {
 });
 
 describe('persistent session catalog', () => {
+  it('selects a historical session for a topic without moving the catalog active selection', async () => {
+    const {directory, store} = await fixture();
+    const old = await store.add(alice, randomUUID(), '旧话题');
+    const current = await store.add(alice, randomUUID(), '另一个话题');
+    const selected = {...alice, sessionId: old.id};
+    expect(await store.current(selected)).toEqual(old);
+    await store.rename(selected, '话题独立命名');
+    await store.archive(selected);
+    expect(await store.current(alice)).toEqual(current);
+    await expect((await SessionStore.open(directory)).current(selected)).resolves.toMatchObject({id: old.id, title: '话题独立命名'});
+    await expect(store.current({...bob, sessionId: old.id})).rejects.toMatchObject({code: 'NOT_FOUND'});
+    await expect(store.current({...alice, sessionId: '000000000000'})).rejects.toMatchObject({code: 'NOT_FOUND'});
+    await expect(store.add(selected, randomUUID())).rejects.toMatchObject({code: 'INVALID_INPUT'});
+  });
+
   it('keeps the active native session across restart with private file permissions', async () => {
     const {directory, store} = await fixture();
     const session = await store.add(alice, randomUUID(), '项目讨论');

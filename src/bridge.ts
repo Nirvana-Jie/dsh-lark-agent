@@ -22,6 +22,8 @@ import {permissionPanel, permissionStateText, type PermissionView} from './permi
 import type {PermissionPreferencesStore} from './permission-preferences.js';
 import type {ArtifactStore, ArtifactContext, SavedArtifact} from './artifacts.js';
 import type {ArtifactPublisher} from './artifact-publisher.js';
+import {TopicStoreError, type TopicStore, type TopicBinding, type TopicScope, type TopicReceipt} from './topic-store.js';
+import {sessionControlPanel, sessionPage, sessionQuery, sessionViewCommandParse, type SessionView} from './session-controls.js';
 
 export interface Runtime {
   create(policy: AgentPolicy): Promise<RuntimeSession>;
@@ -43,6 +45,7 @@ export interface BotState {
   directChats?: {get(openId: string): Promise<string | undefined>; record(openId: string, chatId: string): Promise<void>};
   artifacts?: Pick<ArtifactStore, 'add' | 'get' | 'list' | 'claimPublish' | 'publication' | 'submit'>;
   permissionPreferences?: Pick<PermissionPreferencesStore, 'get' | 'set'>;
+  topics?: Pick<TopicStore, 'get' | 'list' | 'record' | 'occupied'>;
 }
 export interface Transport {
   reply(messageId: string, text: string, options: {idempotencyKey: string; inThread: boolean}): Promise<void>;
@@ -57,6 +60,9 @@ export interface Transport {
   streamCardText?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   updateCardEntity?(cardId: string, card: Record<string, unknown>, sequence: number): Promise<void>;
   replyFile?(messageId: string, path: string, options: {idempotencyKey: string; inThread: boolean; image: boolean}): Promise<void>;
+  openTopic?(target: {chatId: string; messageId?: string}, title: string,
+    options: {idempotencyKey: string; chatType?: 'p2p' | 'group'; textOnly?: boolean}): Promise<TopicReceipt>;
+  topicLink?(messageId: string): Promise<string | undefined>;
 }
 interface RoutedMessage extends IncomingMessage {
   requestId?: string;
@@ -69,9 +75,18 @@ interface RoutedMessage extends IncomingMessage {
   modelView?: ModelView;
   permissionChanged?: boolean;
   formValues?: unknown;
+  topic?: TopicBinding;
+  topicResult?: {binding: TopicBinding; title: string; newEntry?: boolean};
+  conversationKey?: string;
+  laneKey?: string;
+  foreignTopic?: boolean;
+  sessionView?: SessionView;
 }
 interface ModelView {catalog: ModelCatalog; selection: ModelSelection; preference: ModelPreferenceRecord}
 class ArtifactDeliveryError extends Error {}
+/** A creation may have reached Lark. Never send another message as a fallback. */
+class TopicDeliveryError extends Error {}
+interface TopicSession extends SavedSession {conversationKey: string; topic?: TopicBinding}
 /** A running turn's approval or question, answered by a card click outside that turn's queue. */
 interface Interaction {
   ownerId: string;
@@ -90,7 +105,7 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_TEXT = '本次处理超时，已请求取消。请缩小问题范围后重试。';
 const STOPPING_TEXT = '连接正在关闭，本次处理已停止。';
 // Clicks on these panels update the clicked card itself; anything else answers with a new message.
-const IN_PLACE = /^\/(?:(?:model|thinking)(?: (?:use [a-f0-9]{16}|page [0-9]{1,4}))?|permission(?: use [a-z][a-z0-9-]{0,39})?|sessions|new|resume [a-f0-9]{12})$/;
+const IN_PLACE = /^\/(?:(?:model|thinking)(?: (?:use [a-f0-9]{16}|page [0-9]{1,4}))?|permission(?: use [a-z][a-z0-9-]{0,39})?|sessions(?: page [1-9][0-9]?(?: [A-Za-z0-9_-]{1,428})?)?|new|resume [a-f0-9]{12})$/;
 // A switch that finishes sooner goes straight to its result, without a loading frame.
 const PANEL_PROGRESS_DELAY_MS = 150;
 const STALE_SETTINGS = '设置刚刚变化，已刷新为最新选项，请重新选择。';
@@ -102,7 +117,7 @@ class StaleCardError extends Error {
 
 function commandError(error: unknown): string {
   return error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError
-    || error instanceof ModelPreferencesError || error instanceof StaleCardError
+    || error instanceof ModelPreferencesError || error instanceof StaleCardError || error instanceof TopicStoreError || error instanceof TopicDeliveryError
     ? error.message : '操作未完成，请稍后重试；尚未确认保存成功。';
 }
 
@@ -142,15 +157,16 @@ const HELP = `直接把想做的事告诉我就好。
 
 比如：帮我理清一个问题、整理一段文字，或者接着刚才的话题继续。你也可以在私聊告诉我，以后希望我怎样配合你。
 
-私聊底部菜单可以新建话题、找历史对话，或调整模型和思考深度。
+私聊底部菜单可以新建话题、搜索和选择历史对话，或调整模型和思考深度。
+私聊和群聊的新问题都会开一个飞书话题；新话题卡片下方点「回复话题」继续，群聊中仍需 @我。
 也可以发 /new 换话题、/sessions 找对话、/model 看模型、/thinking 调深度、/stop 停下来。`;
 const HARNESS_HELP = `
 
 这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或点底部菜单 设置 → 权限模式）可以切换权限，比如改成不再询问的「完全权限」。模型、思考深度和权限模式与电脑上的 Harness 同步。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
-/new 或 /reset：归档当前会话，下一条消息开启新会话；长期记忆保留
-/sessions：选择以前的对话；/sessions detail 查看完整列表和 ID
-/resume <ID>：恢复列表中的会话
+/new 或 /reset：创建新的飞书话题，在新话题里开始；旧话题和长期记忆保留
+/sessions：搜索、翻页并选择以前的对话；/sessions detail 查看 ID，/sessions page <页码> 查看其他页
+/resume <ID>：打开列表中会话对应的话题，旧会话首次使用时补建话题入口
 /rename <标题>：给当前会话命名
 /status：看看我是否在线；/status detail 查看会话和记忆诊断
 /stop：停止当前处理并取消排队消息
@@ -210,6 +226,8 @@ export class BotBridge {
   private readonly progress: ProgressTracker;
   private readonly interactions = new Map<string, Interaction>();
   private liveUnavailableUntil = 0;
+  private readonly topicCreations = new Map<string, Set<Promise<void>>>();
+  private readonly topicResumes = new Map<string, Promise<TopicBinding>>();
 
   constructor(private readonly config: BotConfig, private readonly runtime: Runtime,
     private readonly transport: Transport, private readonly ledger: MessageLedger,
@@ -227,7 +245,7 @@ export class BotBridge {
     if (ordinary) return ordinary;
     if (!this.config.cardInteractions || !this.state.actions || !raw || typeof raw !== 'object' || Array.isArray(raw)) return;
     const data = raw as Record<string, unknown>;
-    if (data.type !== 'card.action.trigger' || data.action_tag !== 'button'
+    if (data.type !== 'card.action.trigger' || (data.action_tag !== 'button' && data.action_tag !== 'select_static')
       || typeof data.event_id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.event_id)
       || typeof data.message_id !== 'string' || !/^om_[a-zA-Z0-9_-]+$/.test(data.message_id)
       || typeof data.action_value !== 'string' || data.action_value.length > 4000) return;
@@ -240,18 +258,39 @@ export class BotBridge {
       this.audit({stage: 'card-action-rejected'});
       return;
     }
+    let command = binding.command;
+    let sessionView: SessionView | undefined;
+    const browser = sessionViewCommandParse(command);
+    if (data.action_tag === 'select_static') {
+      // A selector can only navigate this owner's catalog, never invoke another signed capability.
+      if (browser?.kind !== 'pick' || data.action_name !== 'dsh_session_picker'
+        || typeof data.option !== 'string' || !/^[a-f0-9]{12}$/.test(data.option)) return;
+      sessionView = browser.view;
+      command = `/resume ${data.option}`;
+    } else if (browser?.kind === 'pick') return;
+    else if (browser) sessionView = browser.view;
+    else if (command === '/sessions search') {
+      if (data.action_name !== 'dsh_sessions_search' || typeof data.form_value !== 'string' || data.form_value.length > 1000) return;
+      let fields: unknown;
+      try {fields = JSON.parse(data.form_value);} catch {return;}
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields) || Object.keys(fields).length !== 1 || !('query' in fields)) return;
+      const query = sessionQuery(fields.query);
+      if (query === undefined) return;
+      sessionView = {page: 0, query};
+      command = '/sessions';
+    }
     let formValues: unknown;
     if (binding.command.startsWith('/answer ') || binding.command.startsWith('/reply ')) {
       if (data.action_name !== 'dsh_submit' || typeof data.form_value !== 'string' || data.form_value.length > 8000) return;
       try {formValues = JSON.parse(data.form_value);} catch {return;}
       if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return;
     }
-    const mutation = /^\/(?:(?:new|resume|forget|answer)(?: |$)|(?:model|thinking|permission) use )/.test(binding.command);
+    const mutation = /^\/(?:(?:new|resume|forget|answer)(?: |$)|(?:model|thinking|permission) use )/.test(command);
     return {messageId: data.message_id, senderId: binding.ownerId, chatId: binding.chatId,
-      chatType: binding.chatType, threadId: binding.threadId, text: binding.command,
+      chatType: binding.chatType, threadId: binding.threadId, text: command,
       requestId: `card:${data.event_id}`, actionNonce: mutation ? binding.nonce : undefined,
       expectedSessionId: binding.expectedSessionId, expectedModelRevision: binding.expectedModelRevision,
-      ...(formValues === undefined ? {} : {formValues})};
+      ...(formValues === undefined ? {} : {formValues}), ...(sessionView ? {sessionView} : {})};
   }
 
   accept(raw: unknown): Promise<void> {
@@ -305,7 +344,23 @@ export class BotBridge {
         await this.answerInteraction(message);
         return;
       }
-      const key = sessionKey(message, this.config);
+      if (this.topicsEnabled() && message.threadId) {
+        // A thread event can arrive as soon as the opening reply is visible.
+        // Wait for its binding, not the model turn that follows it.
+        message.topic = await this.state.topics!.get(this.topicScope(message), message.threadId);
+        if (!message.topic) {
+          await Promise.all(this.topicCreations.get(this.topicScope(message).chatKey) ?? []);
+          if (this.stopped) return;
+          message.topic = await this.state.topics!.get(this.topicScope(message), message.threadId);
+        }
+        message.foreignTopic = !message.topic && await this.state.topics!.occupied(this.topicScope(message).chatKey, message.threadId);
+      }
+      // Recognized settings questions use the entry lane before any provisional topic context is allocated.
+      if (this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
+      const startsTopic = this.topicsEnabled() && !message.threadId && !message.text.startsWith('/');
+      const key = message.topic?.laneKey ?? (startsTopic ? this.newTopicKey(message) : sessionKey(message, this.config));
+      if (startsTopic) message.conversationKey = key;
+      message.laneKey = key;
       let lane = this.lanes.get(key);
       if (message.text === '/stop') {
         if (lane) { lane.generation++; lane.controller?.abort(); lane.session?.cancel(); }
@@ -345,6 +400,10 @@ export class BotBridge {
         finishProgress();
         this.audit({stage: 'completed', messageId: message.messageId, elapsedMs: Date.now() - acceptedAt});
         current.pending--; this.pending--; current.lastUsed = Date.now();
+        // Entry commands create no native session. Do not let their empty lane
+        // take the last slot needed by the topic they just opened.
+        if (this.topicsEnabled() && !current.pending && !current.session && !current.saved && !current.unavailable
+          && this.lanes.get(key) === current) this.lanes.delete(key);
       });
       current.tail = job;
       // Release ingress before waiting for generation, while pending remains bounded.
@@ -358,6 +417,11 @@ export class BotBridge {
 
   private async process(message: RoutedMessage, lane: Lane): Promise<void> {
     const generation = lane.generation;
+    if (this.topicsEnabled() && message.threadId && !message.foreignTopic) {
+      // The first turn may have published its session while this message queued.
+      message.topic = await this.state.topics!.get(this.topicScope(message), message.threadId);
+      if (!message.topic) message.foreignTopic = await this.state.topics!.occupied(this.topicScope(message).chatKey, message.threadId);
+    }
     if (message.chatType === 'group') {
       message.groupAccessKey = await this.state.memories.groupAccessKey(this.context(message));
       if (lane.groupAccessKey !== message.groupAccessKey) {
@@ -367,7 +431,14 @@ export class BotBridge {
         lane.groupAccessKey = message.groupAccessKey;
       }
     }
-    if (this.state.modelPreferences && this.runtime.catalog && isModelQuestion(message.text)) message.text = '/model current';
+    if (this.topicsEnabled() && (message.foreignTopic || (message.topic && message.topic.groupAccessKey !== message.groupAccessKey))) {
+      const fresh = /^\/(?:new|reset|clear)$/i.test(message.text) && message.expectedSessionId === undefined;
+      if (!fresh) return this.reply(message, message.foreignTopic
+        ? '这个话题已有独立的会话。请在主聊天中 @我，或发送 /new 开始你自己的话题。'
+        : '记忆授权已变化，这个话题的旧上下文已停用。请发送 /new 开始新话题。');
+      message.topic = undefined;
+      message.conversationKey = this.entryKey(message);
+    }
     let text = message.text;
     const inPlace = this.inPlace(message);
     // A stale card is redrawn with the current state instead of answered with another message.
@@ -412,15 +483,20 @@ export class BotBridge {
     }
     if (text.startsWith('/')) {
       if (inPlace) return this.panelInPlace(message, lane);
-      const feedback = this.commandFeedback(message);
+      const feedback = this.topicsEnabled() && /^\/(?:new|reset|clear|resume)(?:\s|$)/i.test(text)
+        ? undefined : this.commandFeedback(message);
       let response: string;
       let panel: ReplyPanel | undefined;
       let failed = false;
       try {
         response = await this.command(message, lane);
+        // A newly posted entry card already confirms the operation and owns its thread.
+        // A clicked private picker is handled above and still updates its existing card.
+        if (message.topicResult?.newEntry) return;
         if (this.config.responseMode !== 'text' && (message.menu ? this.transport.sendRichUser : this.transport.replyRich)) panel = await this.commandPanel(message, lane);
       }
       catch (error) {
+        if (error instanceof TopicDeliveryError) throw error;
         failed = true;
         response = commandError(error);
         this.audit({stage: 'command-failed', messageId: message.messageId});
@@ -431,6 +507,22 @@ export class BotBridge {
       return feedback ? feedback.finish(payload, send) : send();
     }
     if (text.length > this.config.maxInputChars) return this.reply(message, '消息过长，请缩短后重试。');
+    if (this.stopped || lane.generation !== generation) return;
+    if (this.topicsEnabled()) {
+      if (!message.threadId) {
+        const binding = await this.createTopic(message, preview(text, 40) || '新话题', message.conversationKey!);
+        message.requestId ??= message.messageId;
+        message.messageId = binding.messageId;
+        message.threadId = binding.threadId;
+        message.topic = binding;
+      } else if (!message.topic) {
+        // A user may start from a native topic that already exists in Lark.
+        const saved = await this.state.sessions.current(this.sessionContext(message));
+        message.topic = await this.state.topics!.record({...this.topicScope(message), threadId: message.threadId,
+          messageId: message.messageId, laneKey: message.laneKey!, conversationKey: this.context(message).conversationKey,
+          ...(saved ? {sessionId: saved.id} : {}), ...(message.groupAccessKey ? {groupAccessKey: message.groupAccessKey} : {})});
+      }
+    }
     if (this.stopped || lane.generation !== generation) return;
     const controller = new AbortController();
     lane.controller = controller;
@@ -759,12 +851,92 @@ export class BotBridge {
     });
   }
 
+  private topicsEnabled(): boolean {return Boolean(this.state.topics && this.transport.openTopic);}
+
+  private topicScope(message: IncomingMessage): TopicScope {
+    return {ownerKey: ownerKey(message, this.config), chatKey: createHash('sha256').update(JSON.stringify([
+      this.config.profile, this.config.botOpenId, message.chatType, message.chatId,
+    ])).digest('hex')};
+  }
+
+  private newTopicKey(message: RoutedMessage): string {
+    return createHash('sha256').update(JSON.stringify([sessionKey({...message, threadId: ''}, this.config),
+      message.requestId ?? message.messageId, 'lark-topic-v1'])).digest('hex');
+  }
+
+  private entryKey(message: IncomingMessage): string {
+    return createHash('sha256').update(JSON.stringify([sessionKey({...message, threadId: ''}, this.config), 'lark-entry-v1'])).digest('hex');
+  }
+
+  private reserveTopic(message: RoutedMessage): () => void {
+    const key = this.topicScope(message).chatKey;
+    const pending = this.topicCreations.get(key) ?? new Set<Promise<void>>();
+    let done!: () => void;
+    const promise = new Promise<void>(resolve => {done = resolve;});
+    pending.add(promise); this.topicCreations.set(key, pending);
+    return () => {done(); pending.delete(promise); if (!pending.size && this.topicCreations.get(key) === pending) this.topicCreations.delete(key);};
+  }
+
+  private async createTopic(message: RoutedMessage, title: string, conversationKey: string, sessionId?: string): Promise<TopicBinding> {
+    const idempotencyKey = createHash('sha256').update(JSON.stringify([this.config.botOpenId,
+      message.requestId ?? message.messageId, 'topic', sessionId ?? 'new'])).digest('hex').slice(0, 40);
+    const target = {chatId: message.chatId,
+      ...(!message.threadId && !message.menu && !message.requestId?.startsWith('card:') && !sessionId && !message.text.startsWith('/')
+        ? {messageId: message.messageId} : {})};
+    let receipt: TopicReceipt | undefined;
+    const release = this.reserveTopic(message);
+    try {
+      if (message.chatType === 'p2p') {
+        const context = this.permissionContext(message);
+        for (const lane of this.lanes.values()) {
+          if (lane.permissionContext?.ownerKey === context.ownerKey && lane.permissionContext.conversationKey === context.conversationKey) {
+            await this.adoptPermission(lane);
+          }
+        }
+      }
+      if (!sessionId && this.state.modelPreferences) {
+        const user = this.config.users.find(item => item.openId === message.senderId)!;
+        if (!this.sharedModel(message, {user})) {
+          const targetContext = {ownerKey: ownerKey(message, this.config), conversationKey};
+          // Capture the current topic's choice, or the main chat's selection,
+          // once. Later main-chat changes must not retarget an existing topic.
+          const source = await this.state.modelPreferences.get(this.context(message))
+            ?? await this.state.modelPreferences.get({...targetContext, conversationKey: this.entryKey(message)})
+            ?? await this.state.modelPreferences.get({...targetContext, conversationKey: sessionKey({...message, threadId: ''}, this.config)});
+          if (source && !await this.state.modelPreferences.get(targetContext)) {
+            await this.state.modelPreferences.set(targetContext, source.selection, {expectedRevision: null});
+          }
+        }
+      }
+      const send = async () => {if (!this.stopped) receipt = await this.transport.openTopic!(target, title,
+        {idempotencyKey, chatType: message.chatType, textOnly: this.config.responseMode === 'text'});};
+      // Do not read or mutate MemoryStore inside its authorization/send critical section.
+      if (message.chatType === 'group') await this.state.memories.withGroupAccess(this.context(message), message.groupAccessKey!, send);
+      else await send();
+      if (!receipt) throw new Error();
+      return await this.state.topics!.record({...this.topicScope(message), threadId: receipt.threadId, messageId: receipt.messageId,
+        ...(receipt.link ? {link: receipt.link} : {}),
+        laneKey: sessionId ? createHash('sha256').update(JSON.stringify([conversationKey, sessionId, 'topic-lane-v1'])).digest('hex') : conversationKey,
+        conversationKey, ...(sessionId ? {sessionId} : {}), ...(message.groupAccessKey ? {groupAccessKey: message.groupAccessKey} : {})});
+    } catch {
+      this.audit({stage: 'topic-creation-unconfirmed', messageId: message.messageId});
+      throw new TopicDeliveryError('话题创建结果未能确认，已停止处理；请检查聊天记录。');
+    } finally {release();}
+  }
+
   private context(message: IncomingMessage): MemoryContext & SessionContext {
-    return {ownerKey: ownerKey(message, this.config), conversationKey: sessionKey(message, this.config), privateChat: message.chatType === 'p2p'};
+    const routed = message as RoutedMessage;
+    return {ownerKey: ownerKey(message, this.config), conversationKey: routed.topic?.conversationKey ?? routed.conversationKey
+      ?? (this.topicsEnabled() && !message.threadId ? this.entryKey(message) : sessionKey(message, this.config)), privateChat: message.chatType === 'p2p'};
   }
 
   private sessionContext(message: RoutedMessage): SessionContext {
-    const context = this.context(message);
+    return {...this.catalogContext(message, this.context(message).conversationKey),
+      ...(message.topic?.sessionId ? {sessionId: message.topic.sessionId} : {})};
+  }
+
+  private catalogContext(message: RoutedMessage, conversationKey: string): SessionContext {
+    const context = {ownerKey: ownerKey(message, this.config), conversationKey, privateChat: message.chatType === 'p2p'};
     if (message.chatType === 'p2p') return context;
     if (!message.groupAccessKey) throw new Error('Missing group memory authorization snapshot');
     // Keep the memory conversation key stable. Only native history is partitioned
@@ -772,6 +944,46 @@ export class BotBridge {
     return {...context, conversationKey: createHash('sha256').update(JSON.stringify([
       context.conversationKey, 'group-memory-v1', message.groupAccessKey,
     ])).digest('hex')};
+  }
+
+  /** Only this user's chat and current disclosure epoch participate in the picker. */
+  private async topicSessions(message: RoutedMessage): Promise<TopicSession[]> {
+    const topics = (await this.state.topics!.list(this.topicScope(message)))
+      .filter(item => item.groupAccessKey === message.groupAccessKey);
+    const contexts = new Set([sessionKey({...message, threadId: ''}, this.config), this.context(message).conversationKey,
+      ...topics.map(item => item.conversationKey)]);
+    const sessions = await Promise.all([...contexts].map(async conversationKey => (await this.state.sessions.list(this.catalogContext(message, conversationKey)))
+      .map(session => ({...session, conversationKey, topic: topics.find(item => item.sessionId === session.id)}))));
+    return [...new Map(sessions.flat().map(session => [session.id, session])).values()]
+      .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+  }
+
+  private async continueTopic(message: RoutedMessage, session: TopicSession): Promise<TopicBinding> {
+    let binding = session.topic;
+    if (!binding) {
+      const key = JSON.stringify([this.topicScope(message), session.id]);
+      let pending = this.topicResumes.get(key);
+      if (!pending) {
+        pending = (async () => {
+          // Another lane may have finished since this picker took its snapshot.
+          const existing = (await this.state.topics!.list(this.topicScope(message)))
+            .find(item => item.sessionId === session.id && item.groupAccessKey === message.groupAccessKey);
+          return existing ?? this.createTopic(message, session.title, session.conversationKey, session.id);
+        })();
+        this.topicResumes.set(key, pending);
+      }
+      try {binding = await pending;} finally {if (this.topicResumes.get(key) === pending) this.topicResumes.delete(key);}
+    }
+    if (!binding.link && this.transport.topicLink) {
+      const link = await this.transport.topicLink(binding.messageId).catch(() => undefined);
+      if (link) binding = await this.state.topics!.record({...binding, link});
+    }
+    return binding;
+  }
+
+  private topicNavigation(binding: TopicBinding, title: string): string {
+    return binding.link ? `已准备好「${title}」。[打开话题继续](${binding.link})。`
+      : `已准备好「${title}」。请在聊天记录中打开对应话题继续。`;
   }
 
   private policy(message: IncomingMessage, lane: Lane, selection?: ModelSelection): AgentPolicy {
@@ -809,7 +1021,11 @@ export class BotBridge {
         if (lane.session.setModelSelection) lane.session.setModelSelection(modelPreference.selection);
         else await this.unload(lane);
       }
-      if (lane.session) { await this.adoptPermission(lane); return; }
+      if (lane.session) {
+        await this.adoptPermission(lane);
+        if (this.topicsEnabled()) await this.applyPermission(message, lane, lane.session, false);
+        return;
+      }
     }
     const context = this.sessionContext(message);
     const saved = await this.state.sessions.current(context);
@@ -826,6 +1042,9 @@ export class BotBridge {
       // before submitting the first prompt. An abandoned creation has no work.
       lane.saved = saved ? await this.bindRestoredSession(context, saved, handle)
         : await this.state.sessions.add(context, handle.id, preview(message.text, 40) || '新会话');
+      if (message.topic && !message.topic.sessionId) {
+        message.topic = await this.state.topics!.record({...message.topic, sessionId: lane.saved.id});
+      }
       lane.restored = Boolean(saved);
       lane.session = handle;
     } catch (error) {
@@ -878,6 +1097,11 @@ export class BotBridge {
     }
     if (command === 'new' || command === 'reset' || command === 'clear') {
       if (args) return '用法：/new；创建新会话后可用 /rename <标题> 命名。';
+      if (this.topicsEnabled()) {
+        const binding = await this.createTopic(message, '新话题', this.newTopicKey(message));
+        message.topicResult = {binding, title: '新话题', newEntry: true};
+        return this.topicNavigation(binding, '新话题');
+      }
       await this.unload(lane);
       await this.state.sessions.archive(conversation);
       lane.saved = undefined;
@@ -885,13 +1109,16 @@ export class BotBridge {
       return '好，我们换个话题。之前的对话还在，需要时可以用 /sessions 找回来。';
     }
     if (command === 'sessions') {
-      const sessions = await this.state.sessions.list(conversation);
+      const sessions = this.topicsEnabled() ? await this.topicSessions(message) : await this.state.sessions.list(conversation);
       const current = await this.state.sessions.current(conversation);
-      if (args !== 'detail') return sessions.length ? '你在这里聊过的话题：\n' + sessions.slice(0, 20)
-        .map(s => `${s.id === current?.id ? '正在聊 · ' : ''}${s.title}`).join('\n')
-        + '\n可以点卡片里的话题继续；没有按钮时，发送 /sessions detail 查看可用操作。'
+      const view = message.sessionView ?? sessionViewCommandParse(message.text)?.view ?? {page: 0, query: ''};
+      const page = sessionPage(sessions, view);
+      if (args !== 'detail') return sessions.length ? `当前聊天的话题（${page.total} 个${view.query ? '匹配' : ''}，第 ${page.view.page + 1}/${page.pages} 页）：\n` + page.items
+        .map(s => `${s.id === current?.id ? '正在聊 · ' : ''}${s.title}\n/resume ${s.id}`).join('\n')
+        + '\n可在卡片中搜索或选择话题。文字操作：/sessions page <页码>。'
         : '这里还没有以前的对话，直接开始聊就好。';
-      return sessions.length ? `当前聊天／话题的会话（${sessions.length} 个）：\n` + sessions.slice(0, 20).map(s => `${s.id}${s.id === current?.id ? ' [当前]' : ''} · ${s.title}`).join('\n') + '\n用 /resume <ID> 切换；只显示你在当前聊天／话题的历史。' : '当前聊天／话题还没有保存的会话。';
+      return sessions.length ? `当前聊天的会话（${sessions.length} 个）：\n` + sessions.slice(0, 20).map(s => `${s.id}${s.id === current?.id ? ' [当前]' : ''} · ${s.title}`).join('\n')
+        + (this.topicsEnabled() ? '\n用 /resume <ID> 打开对应话题；只显示你在当前聊天有权访问的历史。' : '\n用 /resume <ID> 切换；只显示你在当前聊天／话题的历史。') : '当前聊天／话题还没有保存的会话。';
     }
     if (command === 'rename') {
       if (!args) return '用法：/rename <标题>';
@@ -901,9 +1128,24 @@ export class BotBridge {
     }
     if (command === 'resume') {
       if (!/^[a-f0-9]{12}$/.test(args)) return '用法：/resume <ID>；请从当前聊天的 /sessions 列表选择。';
+      if (this.topicsEnabled()) {
+        const sessions = await this.topicSessions(message);
+        const target = (message.sessionView ? sessionPage(sessions, message.sessionView).items : sessions).find(session => session.id === args);
+        if (!target) {
+          if (message.sessionView) throw new SessionStoreError('NOT_FOUND');
+          return '在你当前的聊天中找不到这个会话。';
+        }
+        const binding = await this.continueTopic(message, target);
+        message.topicResult = {binding, title: target.title, newEntry: !target.topic};
+        return this.topicNavigation(binding, target.title);
+      }
       // Resolve authorization before touching the running handle or native log.
-      const target = (await this.state.sessions.list(conversation)).find(s => s.id === args);
-      if (!target) return '在你当前的聊天／话题中找不到这个会话。';
+      const sessions = await this.state.sessions.list(conversation);
+      const target = (message.sessionView ? sessionPage(sessions, message.sessionView).items : sessions).find(s => s.id === args);
+      if (!target) {
+        if (message.sessionView) throw new SessionStoreError('NOT_FOUND');
+        return '在你当前的聊天／话题中找不到这个会话。';
+      }
       if (!lane.unavailable && lane.session && lane.saved?.id === target.id) return `已经在会话「${target.title}」中。`;
       await this.unload(lane);
       const preference = await this.state.modelPreferences?.get(context);
@@ -963,7 +1205,7 @@ export class BotBridge {
     return '未知命令。发送 /help 查看可用命令。';
   }
 
-  private harness(message: RoutedMessage, lane: Lane): boolean {
+  private harness(message: RoutedMessage, lane: Pick<Lane, 'user'>): boolean {
     return message.chatType === 'p2p' && lane.user.directMode === 'harness';
   }
 
@@ -971,7 +1213,7 @@ export class BotBridge {
    * The owner's harness chat on the App host shares model and thinking depth
    * with the App, like any App session; an administrator's fixed route does not.
    */
-  private sharedModel(message: RoutedMessage, lane: Lane): boolean {
+  private sharedModel(message: RoutedMessage, lane: Pick<Lane, 'user'>): boolean {
     return this.harness(message, lane) && Boolean(this.runtime.sharesModelSelection?.()) && !(this.config.provider && this.config.model);
   }
 
@@ -998,7 +1240,7 @@ export class BotBridge {
     const view = this.permissionView(lane);
     if (!view) return;
     if (view.current) return view;
-    const saved = await this.state.permissionPreferences?.get(this.context(message));
+    const saved = await this.state.permissionPreferences?.get(this.permissionContext(message));
     return saved && view.options.some(option => option.id === saved) ? {...view, current: saved} : view;
   }
 
@@ -1012,7 +1254,7 @@ export class BotBridge {
     const option = view.options.find(item => item.id === choice);
     if (!option) return '请通过权限模式卡片选择，或发送 /permission 查看可用选项。';
     // Save first: a later session in this chat starts in the chosen mode even if the live switch fails.
-    await this.state.permissionPreferences?.set(this.context(message), option.id);
+    await this.state.permissionPreferences?.set(this.permissionContext(message), option.id);
     if (lane.session?.setPermission) {
       lane.session.setPermission(option.id);
       lane.permissionSeen = option.id;
@@ -1024,7 +1266,7 @@ export class BotBridge {
   /** Bring a newly opened harness session to the chat's choice, or a new one without a choice to the App's default. */
   private async applyPermission(message: RoutedMessage, lane: Lane, handle: RuntimeSession, fresh: boolean): Promise<void> {
     if (!this.harness(message, lane) || !handle.setPermission) return;
-    const {ownerKey, conversationKey} = this.context(message);
+    const {ownerKey, conversationKey} = this.permissionContext(message);
     lane.permissionContext = {ownerKey, conversationKey};
     const saved = await this.state.permissionPreferences?.get(lane.permissionContext);
     const state = handle.permissionState?.();
@@ -1032,6 +1274,11 @@ export class BotBridge {
     const target = saved ?? (fresh ? state?.defaultPreset : undefined);
     if (state && target && state.current !== target && state.options.some(option => option.id === target)) handle.setPermission(target);
     lane.permissionSeen = handle.permissionState?.()?.current;
+  }
+
+  private permissionContext(message: RoutedMessage): SessionContext {
+    return this.topicsEnabled() ? {ownerKey: ownerKey(message, this.config),
+      conversationKey: sessionKey({...message, threadId: ''}, this.config)} : this.context(message);
   }
 
   /** A preset changed in the App on this chat's live session becomes the chat's choice, so new sessions keep it. */
@@ -1138,6 +1385,12 @@ export class BotBridge {
     card?: {pending?: boolean; error?: string; notice?: string}): Promise<ReplyPanel | undefined> {
     const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(message.text);
     const command = match?.[1]?.toLowerCase(), args = (match?.[2] ?? '').trim();
+    if (message.topicResult && command !== 'new' && !message.sessionView && !card?.pending && !card?.error && !card?.notice) {
+      const {binding, title} = message.topicResult;
+      const text = this.topicNavigation(binding, title);
+      return {title: '话题已就绪', tone: 'success', summary: `打开「${preview(title, 40)}」继续`,
+        sections: [{title: preview(title, 40), text}], note: message.chatType === 'group' ? '在话题里继续 @机器人。' : '在对应话题中发消息，就能接着之前的上下文。'};
+    }
     const choice = /^use (\S+)$/.exec(args)?.[1];
     const pending = card?.pending ? choice : undefined;
     const interactive = this.cardActionsReady && this.config.cardInteractions && Boolean(this.state.actions);
@@ -1169,37 +1422,28 @@ export class BotBridge {
     }
     // Ordinary conversation and diagnostics stay out of management cards.
     // A card is useful here because the user explicitly wants to pick a topic.
-    const topic = card && (command === 'resume' || command === 'new');
+    const topic = (card || message.sessionView || message.topicResult) && (command === 'resume' || command === 'new');
     if ((command !== 'sessions' || args === 'detail') && !topic) return;
     const conversation = this.sessionContext(message);
     const current = await this.state.sessions.current(conversation);
-    const sessions = await this.state.sessions.list(conversation);
-    if (!sessions.length) return;
+    const sessions = this.topicsEnabled() ? await this.topicSessions(message) : await this.state.sessions.list(conversation);
     const busy = Boolean(card?.pending);
     const target = command === 'resume' ? sessions.find(s => s.id === args) : undefined;
     const status: ReplyPanel['status'] = card?.error ? {text: card.error, tone: 'error'}
-      : busy ? {text: target ? `正在切换到「${preview(target.title, 40)}」…` : '正在开始新话题…', tone: 'pending'}
-      : topic && command === 'resume' && target ? {text: `已切换到「${preview(target.title, 40)}」，可以接着聊了。`, tone: 'success'}
+      : busy ? {text: target ? `正在打开「${preview(target.title, 40)}」…` : command === 'new' ? '正在开始新话题…' : '正在查找话题…', tone: 'pending'}
+      : card?.notice ? {text: card.notice}
+      : topic && command === 'resume' && target ? undefined
+      : command === 'new' && message.topicResult ? {text: message.topicResult.binding.link
+        ? `新话题已创建。[进入新话题](${message.topicResult.binding.link})` : '新话题已创建，请在新卡片下方回复话题。'}
       : topic ? {text: '好，换个话题。直接发消息就会开始新的对话，之前的还在这里。', tone: 'success'}
-      : card?.notice ? {text: card.notice} : undefined;
-    const actions: ReplyAction[] = [];
-    const add = (label: string, command: string, options: {confirm?: ReplyAction['confirm']; expectedSessionId?: string | null} = {}) => {
-      if (busy) { actions.push({label, value: {}, disabled: true}); return; }
+      : undefined;
+    return sessionControlPanel(sessions.map(session => ({...session, ...('topic' in session && (session as TopicSession).topic?.link
+      ? {link: (session as TopicSession).topic!.link} : {})})), current?.id, (label, command): ReplyAction | undefined => {
       if (!interactive) return;
-      const token = this.state.actions!.issue({ownerId: message.senderId, chatId: message.chatId,
-        chatType: message.chatType, threadId: message.threadId, sourceMessageId: message.messageId,
-        command, ...(options.expectedSessionId === undefined ? {} : {expectedSessionId: options.expectedSessionId})});
-      actions.push({label, value: {token}, confirm: options.confirm});
-    };
-    for (const session of sessions.filter(s => s.id !== current?.id).slice(0, 5)) add(`继续 ${preview(session.title, 14)}`, `/resume ${session.id}`,
-      {expectedSessionId: current?.id ?? null, confirm: {title: '接着这个话题聊？', text: `继续「${preview(session.title, 40)}」，现在的对话会保留。`}});
-    if (current) add('换个话题', '/new', {expectedSessionId: current.id,
-      confirm: {title: '开始新话题？', text: '之前的对话会保留，需要时可以再找回来。'}});
-    return {title: '以前的对话', subtitle: '选一个话题，接着聊', tone: status?.tone ?? 'normal', ...(status ? {status} : {}),
-      summary: status?.text ?? '选择以前的话题继续，或开始一段新对话', actions,
-      sections: sessions.slice(0, 5).map(s => ({title: preview(s.title, 40), text: s.id === current?.id ? '正在聊这个话题' : '可以接着聊'})),
-      ...(!interactive || sessions.length > 5 ? {note: '完整列表和更多操作：/sessions detail'} : {}),
-    };
+      if (busy) return {label, value: {}, disabled: true};
+      return {label, value: {token: issue(command, /^(?:\/new|\/sessions pick )/.test(command) ? {expectedSessionId: current?.id ?? null} : {})}};
+    }, {view: message.sessionView ?? sessionViewCommandParse(message.text)?.view,
+      selectedId: !card?.error && !card?.notice && !busy ? target?.id : undefined, busy, status});
   }
 
   private async reply(message: RoutedMessage, text: string, signal?: AbortSignal): Promise<void> {

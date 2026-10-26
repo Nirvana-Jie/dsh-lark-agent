@@ -21,7 +21,7 @@
 | 改动 | 先读 | 验证重点 |
 | --- | --- | --- |
 | 插件入口、消息服务、重连与关闭 | `src/index.ts`、`src/bot-service.ts`、`src/config.ts` | `index`、`config` 测试 |
-| 扫码、应用配置、配对与启停 | `src/onboarding/controller.ts`、`lark-platform.ts`、`pairing.ts`、`store.ts` | `onboarding`、`lark-platform` 测试 |
+| 扫码、应用配置、模型预检、配对与启停 | `src/onboarding/controller.ts`、`model-check.ts`、`lark-platform.ts`、`pairing.ts`、`store.ts` | `onboarding`、`onboarding-model`、`lark-platform` 测试 |
 | 宿主 RPC、所有者权限、接入状态目录 | `src/onboarding/host.ts`、`protocol.ts` | `onboarding-rpc`、`client-modern-host`、`index` 测试 |
 | 设置页、异步反馈、客户端打包、升级提示 | `src/client/`、`src/onboarding/updates.ts`、`scripts/build-client.mjs` | `client-api`、`client-card`、`update-check` 测试；检查 `./client` 入口及真实宿主加载 |
 | 身份、准入、队列、命令 | `src/message.ts`、`src/bridge.ts` | `message`、`bridge`、`rich-bridge` 测试 |
@@ -29,7 +29,7 @@
 | 模型选择、思考深度与旧卡片冲突 | `src/model-controls.ts`、`src/model-preferences.ts`、`src/bridge.ts` | `model-controls-bridge`、`model-preferences`、`dsh-runtime-model-native` 测试 |
 | 飞书底部菜单、私聊定位 | `src/bot-menu.ts`、`src/direct-chats.ts`、`src/lark-cli.ts` | `bot-menu`、`direct-chats`、`model-controls-bridge`、`bot-service` 测试 |
 | 记忆可见性、群授权 | `src/memory-store.ts`、`src/bridge.ts` | `memory-store`、`memory-privacy` 测试 |
-| 会话目录、去重、全局机器人租约 | `src/session-store.ts`、`src/ledger.ts`、`src/lock.ts`、`src/bot-service.ts` | `session-store`、`state`、`index`、`onboarding` 测试 |
+| 会话目录、历史选择器、原生话题、去重、全局机器人租约 | `src/session-store.ts`、`src/session-controls.ts`、`src/topic-store.ts`、`src/topic-cards.ts`、`src/bridge.ts`、`src/ledger.ts`、`src/lock.ts`、`src/bot-service.ts` | `session-store`、`session-controls`、`topic-store`、`topic-cards`、`topic-bridge`、`state`、`index`、`onboarding` 测试 |
 | CLI 传输、进度、卡片 | `src/lark-cli.ts`、`src/progress.ts`、`src/replies.ts`、`src/card-actions.ts` | 同名测试与 `rich-bridge` |
 | 私聊菜单加载与原地更新 | `src/command-feedback.ts`、`src/bridge.ts`、`src/lark-cli.ts` | `command-feedback`、`model-controls-bridge`、`lark-cli` 测试 |
 | 结构化作品、表单、云端图示与报告 | `src/presentation.ts`、`src/artifacts.ts`、`src/artifact-publisher.ts`、`src/rich-scopes.ts` | `presentation`、`artifacts`、`artifact-publisher`、`presentation-flow`；兼容矩阵里的原生展示工具 |
@@ -46,7 +46,8 @@
 - `configFile` / `DSH_LARK_CONFIG` 有值时加载显式团队配置；留空时注册连接设置。两条入口复用 `createBotService`，保持相同准入、持久化和关闭规则。
 - 控制面只允许宿主所有者访问：旧 RPC 保留 loopback 授权，新 RPC 校验 owner principal。UI 只传协议列出的操作字段，不接受任意配置路径、身份或密钥。
 - 设置页的升级提示只读 npm 包文档中的 `latest` 标签及其发布时间（只发包名；设置页轮询时最多 6 小时一次，后台进行，不阻塞状态读取，失败不提示），发布满 24 小时才经快照的 `update` 字段送到页面：App 与 `dsh plugin` 的 pnpm 11 默认跳过发布不满一天的版本，提前提示只会装上旧版。插件不自行下载、替换或重装自己：App 内只经公开的 `pluginNavigation.openList()` 打开插件列表，旧 App 与 Web 只给步骤和命令。测试经 `latestRelease` 注入，不访问网络。
-- 绑定来自未过期配对词对应的真实私聊事件，并匹配创建者或经过本机所有者确认。原生模型检查、连接就绪和飞书确认回复成功后才持久化启用；取消、响应未知、关闭失败时保留可恢复状态。
+- 绑定来自未过期配对词对应的真实私聊事件，并匹配创建者或经过本机所有者确认。模型连通性检查、连接就绪和飞书确认回复成功后才持久化启用；取消、响应未知、关闭失败时保留可恢复状态。
+- 连接模型预检通过宿主公开的 `llm.stream()` 发送固定测试消息，成功、失败、取消和超时均不创建或保留测试会话。仅验证模型，不读取用户内容或调用工具。
 - 自动接入仅授权本人私聊，`groupChats: []`，本人私聊为 Harness 模式（`directMode: 'harness'`）；团队配置默认仍是受限助手，群聊始终受限并使用 `allowedTools`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
 - Harness 模式只用于已验证本人的私聊（运行时对非私聊策略拒绝创建），飞书只是该 Harness 会话的入口：保留宿主人设、运行时上下文、工具、展示模式与权限策略，只追加 `lark-channel` 渠道段。宿主审批和提问由插件按 agent 作用域监听，转成签名卡片发给本人；卡片答复绕过会话队列（运行中的回合正占着它），按 ID 一次有效并校验操作者与聊天，超时、取消或卡片不可用一律拒绝。旧宿主的提问只有全局浏览器提供方，Harness 模式下隐藏 `ask_user_question`，由模型在回复里提问。会话按宿主的 agent 预设组成（新会话记录默认预设，恢复时用记录的或默认的），受限会话不加入预设。
 - 权限模式只在本人 Harness 私聊切换：经签名一次性卡片或本人命令，选项取自宿主公开的 `permissionPresets.catalog()`，经 `set()` 作用于当前会话；选择按私聊保存并在新开或恢复的会话上补齐，不修改宿主默认或其他会话。App 在当前会话上改的模式（与上次所见不同）记为私聊选择，卸载会话（`/new`、`/resume`、闲置回收、恢复）和关闭服务前也要先记下；私聊没有选择时，新会话用 `catalog().defaultPreset`（新建会话带 `seed: []`，宿主不会自动补默认），恢复的会话保留其记录。没有目录的旧宿主不提供该入口。
@@ -64,6 +65,8 @@
 - 保持群策略键、授权 epoch 与原生历史的隔离，不能把旧群历史导入新的授权范围。`withGroupAccess` 回调只负责发送，不能重入 MemoryStore。
 - 先持久化消息 claim 再执行；原生 checkpoint 成功后才发布会话目录或确认回复。保存结果不确定时拒绝继续访问，不能用空状态掩盖失败。
 - 每个用户／聊天／话题串行，取消只影响所属队列。修改型卡片 nonce 在容量准入后消费；回调继续校验签名、操作者、聊天和当前权限。
+- 私聊与群聊的新会话均绑定飞书原生话题；只使用真实事件的 `thread_id` 或已确认的机器人回复回执，不从引用/root ID 猜测。主聊天新问题先创建并持久化绑定，再推理，首轮与立即到达的话题消息共用队列。菜单、新话题和旧会话入口可新建根消息；创建结果未知不重发、不转到主聊天推理。菜单和 `/new` 使用卡片作为独立话题根消息，不另发独立确认卡，可复用的历史选择卡不改绑成新话题；收到问题才创建原生会话；`/resume` 定位话题，旧记录用原 context 与显式 sessionId 绑定，不修改兄弟会话的 activeId。话题目录按所有者与聊天授权，群聊仍需 @、保持受限模式，授权 epoch 变化后旧话题不得续聊。话题绑定在原生 checkpoint 与目录保存成功后补记 sessionId，持久化结果未知时停止访问。
+- 话题入口控制不恢复主聊天的旧 active 会话；空的命令队列完成后及时回收，不能占住新话题的最后一个容量名额。非共享模型在新建话题时捕获当前话题或主聊天的选择，不回溯修改已有话题；App 共享模型仍用宿主默认。Harness 权限选择继续按本人私聊保存，开话题前记下 App 对存活会话的修改，已有话题下一轮补齐私聊选择。
 - 受限模式（群聊、团队配置的默认私聊）保留独立 complete persona、动态上下文抑制、native tools、`restrict` 与单向 `guard`，以及宿主审批拒绝；不能把 Harness 模式、思考过程、实时卡片或确认卡片扩展到群聊。工作目录不是文件系统沙箱；额外工具必须自身实施资源权限。
 - CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。实时卡片只有首次回复算发送：卡片实体创建失败才改用普通回复（之后 10 分钟不再尝试）；回复结果未知时继续更新卡片、不另发消息。对同一卡片实体的更新幂等，可用更高的 sequence 重试。一次回复只用一张卡片：思考过程与工具步骤默认折叠、按 App 的步骤名逐行显示，终稿优先放回答，过程用全部剩余空间，超出卡片上限时从最早的步骤省略并注明，不另发消息；工具详情和面板标题只用纯文本或转义后的内容。
 - Harness 交付的文件只在 realpath 位于该用户工作区内、是非空普通文件且不超过 30 MB 时上传，CLI 只收到以文件所在目录为 cwd 的 `./basename`；其余只告知电脑上的位置，上传结果未知时不重发。

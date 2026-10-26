@@ -150,7 +150,7 @@ describe('persistent conversation lifecycle', () => {
     expect(await h.sessions.current(h.context())).toBeUndefined();
     expect(await h.memories.list(h.context())).toHaveLength(1);
     await h.bridge.accept(event('/sessions'));
-    expect(h.latestReply()).not.toContain(old.id);
+    expect(h.latestReply()).toContain(`/resume ${old.id}`);
     expect(h.latestReply()).toContain('原来的计划');
     await h.bridge.accept(event('/sessions detail'));
     expect(h.latestReply()).toContain(old.id);
