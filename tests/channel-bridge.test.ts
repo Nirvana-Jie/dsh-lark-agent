@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BotBridge } from '../src/bridge.js';
 import { CardActions } from '../src/card-actions.js';
 import { parseConfig } from '../src/config.js';
-import type { AgentPolicy, ModelSelection, RuntimeSession, TurnObserver } from '../src/dsh-runtime.js';
+import type { AgentPolicy, ModelSelection, RuntimeContinuation, RuntimeSession, TurnObserver } from '../src/dsh-runtime.js';
 import { DiskLedger } from '../src/ledger.js';
 import { MemoryStore } from '../src/memory-store.js';
 import type { ReplyPayload } from '../src/replies.js';
@@ -15,6 +15,7 @@ import { ModelPreferencesStore } from '../src/model-preferences.js';
 import { modelChoiceKey, thinkingChoiceKey } from '../src/model-controls.js';
 import { DshRuntimeError } from '../src/dsh-runtime.js';
 import { PermissionPreferencesStore } from '../src/permission-preferences.js';
+import { TopicStore } from '../src/topic-store.js';
 
 const directories: string[] = [];
 const LATER = 365 * 24 * 60 * 60_000;
@@ -61,7 +62,7 @@ function tokens(payload: ReplyPayload | undefined): string[] {
 const EFFORTS = [{id: 'low', name: '低'}, {id: 'high', name: '高'}];
 const PERMISSIONS = [{id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改'}, {id: 'danger-full-access', name: '完全权限'}];
 
-async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; shared?: boolean; turnTimeoutMs?: number} = {}) {
+async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; shared?: boolean; turnTimeoutMs?: number; topics?: boolean; maxPendingPerSession?: number} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-channel-bridge-'));
   directories.push(directory);
   const workspace = join(directory, 'alice');
@@ -69,6 +70,7 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const config = parseConfig({profile: 'channel-test', botOpenId: 'ou_bot', stateDir: join(directory, 'state'),
     cardInteractions: options.cards ?? true, streamingCards: options.streaming ?? true, loadingReaction: true,
     ...(options.turnTimeoutMs ? {turnTimeoutMs: options.turnTimeoutMs} : {}),
+    ...(options.maxPendingPerSession ? {maxPendingPerSession: options.maxPendingPerSession} : {}),
     users: [{openId: 'ou_alice', direct: true, directMode: 'harness', groupChats: ['oc_group'], cwd: workspace}]});
   const sessions = await SessionStore.open(config.stateDir);
   const memories = await MemoryStore.open(config.stateDir);
@@ -77,6 +79,7 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
   const run = vi.fn<Run>(options.run ?? (async () => '普通回答'));
   const policies: AgentPolicy[] = [];
   const hostRecord = {model: 'm'};
+  const continuationListeners = new Map<string, (turn: RuntimeContinuation) => Promise<void>>();
   const handles: Array<RuntimeSession & {setPermission?: ReturnType<typeof vi.fn>; changeInApp?: (next: string) => void;
     setModelSelection?: ReturnType<typeof vi.fn>; checkpoint: ReturnType<typeof vi.fn>; changeModelInApp?: (next: ModelSelection) => void}> = [];
   const handle = (policy: AgentPolicy, id: string = randomUUID()): RuntimeSession => {
@@ -84,6 +87,10 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
     let current = 'workspace-write';
     let selection: ModelSelection = {provider: policy.provider ?? 'p', model: policy.model ?? hostRecord.model};
     const value = {id, run: (...args: Parameters<Run>) => run(...args), checkpoint: vi.fn(async () => undefined), cancel: vi.fn(), dispose: vi.fn(async () => undefined),
+      onContinuation: vi.fn((listener: (turn: RuntimeContinuation) => Promise<void>) => {
+        continuationListeners.set(id, listener);
+        return () => continuationListeners.delete(id);
+      }),
       ...(options.models ? {modelSelection: () => ({...selection}), setModelSelection: vi.fn((next: ModelSelection) => { selection = {...next}; }),
         sharesModelSelection: Boolean(options.shared), changeModelInApp: (next: ModelSelection) => { selection = {...next}; }} : {}),
       ...(options.permissions ? {permissionState: () => ({current, options: PERMISSIONS, ...(options.defaultPreset ? {defaultPreset: options.defaultPreset} : {})}),
@@ -100,6 +107,7 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
       resolveModelSelection: async (selection?: {provider: string; model: string}) => selection ?? {provider: 'p', model: 'm'}} : {}),
     ...(options.shared ? {sharesModelSelection: () => true, saveDefaultModel: vi.fn(async (_selection: ModelSelection) => undefined)} : {})};
   let feedbackCount = 0;
+  let topicCount = 0;
   const transport = {
     reply: vi.fn(async (_id: string, _text: string, _options: unknown) => undefined),
     replyRich: vi.fn(async (_id: string, _payload: ReplyPayload, _options: unknown) => undefined),
@@ -110,19 +118,29 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
     streamCardText: vi.fn(async () => undefined),
     updateCardEntity: vi.fn(async (_id: string, _card: Record<string, unknown>, _sequence: number) => undefined),
     replyFile: vi.fn(async (_id: string, _path: string, _options: {idempotencyKey: string; inThread: boolean; image: boolean}) => undefined),
+    ...(options.topics ? {openTopic: vi.fn(async () => {
+      const index = ++topicCount;
+      return {threadId: `omt_topic_${index}`, messageId: `om_topic_${index}`};
+    })} : {}),
   };
   const progress = {startProgress: vi.fn(async () => 'reaction'), finishProgress: vi.fn(async () => undefined)};
   const audit = vi.fn();
   const permissionPreferences = options.permissions ? await PermissionPreferencesStore.open(config.stateDir) : undefined;
   const modelPreferences = options.models ? await ModelPreferencesStore.open(config.stateDir) : undefined;
   const bridge = new BotBridge(config, runtime, transport, ledger, {sessions, memories, actions,
+    ...(options.topics ? {topics: await TopicStore.open(config.stateDir)} : {}),
     ...(permissionPreferences ? {permissionPreferences} : {}), ...(modelPreferences ? {modelPreferences} : {})}, audit, progress);
   bridge.setCardActionsReady(true);
   bridges.add(bridge);
   const sentText = () => [...transport.reply.mock.calls.map(call => call[1]),
     ...transport.replyRich.mock.calls.map(call => call[1].kind === 'text' ? call[1].text : call[1].kind === 'post' ? call[1].markdown : call[1].fallbackText)];
   const finalCard = () => JSON.stringify(transport.updateCardEntity.mock.calls.at(-1)?.[1] ?? {});
-  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences, hostRecord};
+  const continueTurn = async (index: number, turn: RuntimeContinuation) => continuationListeners.get(handles[index]!.id)?.(turn);
+  return {bridge, run, runtime, policies, handles, transport, progress, audit, actions, workspace, sentText, finalCard, permissionPreferences, hostRecord, continueTurn, continuationListeners, ledger};
+}
+
+function hostTurn(id: string, run: RuntimeContinuation['run'] = async () => 'continuation result') {
+  return {id, pending: true, run: vi.fn(run), cancel: vi.fn()};
 }
 
 describe('BotBridge harness channel', () => {
@@ -150,6 +168,141 @@ describe('BotBridge harness channel', () => {
     expect(h.finalCard()).toContain('"streaming_mode":false');
     expect(h.sentText()).toEqual([]);
     expect(h.progress.startProgress).not.toHaveBeenCalled();
+  });
+
+  it('delivers a late subagent continuation to the same thread with its own live card and updated file', async () => {
+    const h = await setup();
+    const original = event('review this', {thread_id: 'omt_review'});
+    await h.bridge.accept(original);
+    const report = join(h.workspace, 'report.md');
+    await writeFile(report, 'updated report');
+    const turn: RuntimeContinuation = {id: `${h.handles[0]!.id}:2`, pending: true, cancel: vi.fn(), run: vi.fn(async (_signal, _context, observer) => {
+      observer?.stream?.({type: 'attempt'});
+      observer?.stream?.({type: 'text', text: 'updated report'});
+      return {text: 'updated report', artifacts: [], files: [{path: report, description: 'Revised report'}]};
+    })};
+    await h.continueTurn(0, turn);
+    expect(h.finalCard()).toContain('updated report');
+    expect(h.transport.replyCardEntity).toHaveBeenCalledTimes(2);
+    const cards = h.transport.replyCardEntity.mock.calls as unknown as Array<[string, string, {idempotencyKey: string; inThread: boolean}]>;
+    expect(cards.map(call => [call[0], call[2].inThread])).toEqual([[original.message_id, true], [original.message_id, true]]);
+    expect(cards[1]![2].idempotencyKey).not.toBe(cards[0]![2].idempotencyKey);
+    expect(h.transport.replyFile).toHaveBeenCalledExactlyOnceWith(original.message_id, await realpath(report), expect.objectContaining({inThread: true}));
+    expect(h.run).toHaveBeenCalledOnce();
+    expect(h.sentText()).toEqual([]);
+  });
+
+  it('keeps continuations in their own native topic when the owner starts a sibling topic', async () => {
+    const h = await setup({topics: true, streaming: false});
+    await h.bridge.accept(event('first task'));
+    await h.bridge.accept(event('second task'));
+    const first = hostTurn(`${h.handles[0]!.id}:2`, async () => 'first task revised');
+    const second = hostTurn(`${h.handles[1]!.id}:2`, async () => 'second task revised');
+    await h.continueTurn(0, first);
+    await h.continueTurn(1, second);
+    expect(h.transport.openTopic).toHaveBeenCalledTimes(2);
+    expect(h.transport.replyRich.mock.calls.slice(-2).map(call => [call[0], call[1], call[2]]))
+      .toEqual([
+        ['om_topic_1', expect.any(Object), expect.objectContaining({inThread: true})],
+        ['om_topic_2', expect.any(Object), expect.objectContaining({inThread: true})],
+      ]);
+    expect(h.sentText().slice(-2)).toEqual(['first task revised', 'second task revised']);
+    expect(h.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('serializes ordinary messages behind a continuation and claims each host turn once', async () => {
+    const h = await setup({streaming: false});
+    const original = event('first', {thread_id: 'omt_review'});
+    await h.bridge.accept(original);
+    let finish!: (result: string) => void;
+    const turn = hostTurn(`${h.handles[0]!.id}:2`, async () => new Promise<string>(resolve => {finish = resolve;}));
+    const continuation = h.continueTurn(0, turn);
+    await vi.waitFor(() => expect(turn.run).toHaveBeenCalledOnce());
+    const incoming = h.bridge.accept(event('next', {thread_id: 'omt_review'}));
+    expect(h.run).toHaveBeenCalledOnce();
+    finish('late result');
+    await Promise.all([continuation, incoming]);
+    expect(h.sentText()).toEqual(['普通回答', 'late result', '普通回答']);
+    await h.continueTurn(0, turn);
+    expect(turn.run).toHaveBeenCalledOnce();
+    expect(h.sentText()).toHaveLength(3);
+  });
+
+  it('cancels a running continuation and its queued successors through the original topic stop command', async () => {
+    const h = await setup();
+    await h.bridge.accept(event('first', {thread_id: 'omt_review'}));
+    const turn = hostTurn(`${h.handles[0]!.id}:2`, (signal, _context, observer) => new Promise((_resolve, reject) => {
+      observer?.stream?.({type: 'text', text: 'working'});
+      signal.addEventListener('abort', () => reject(new DshRuntimeError('CANCELLED')), {once: true});
+    }));
+    const running = h.continueTurn(0, turn);
+    await vi.waitFor(() => expect(turn.run).toHaveBeenCalledOnce());
+    const next = hostTurn(`${h.handles[0]!.id}:3`);
+    const queued = h.continueTurn(0, next);
+    await h.bridge.accept(event('/stop', {thread_id: 'omt_review'}));
+    await Promise.all([running, queued]);
+    expect(h.finalCard()).toContain('已停止。');
+    expect(next.run).not.toHaveBeenCalled();
+    expect(next.cancel).toHaveBeenCalled();
+    expect(h.sentText()).toEqual(['已请求停止当前处理，排队消息已取消。']);
+  });
+
+  it('rejects continuations at queue capacity and after unloading or stopping, and never subscribes group sessions', async () => {
+    const h = await setup({streaming: false, maxPendingPerSession: 1});
+    await h.bridge.accept(event('first'));
+    const oldListener = h.continuationListeners.get(h.handles[0]!.id)!;
+    let finish!: (result: string) => void;
+    const first = hostTurn(`${h.handles[0]!.id}:2`, async () => new Promise<string>(resolve => {finish = resolve;}));
+    const running = h.continueTurn(0, first);
+    await vi.waitFor(() => expect(first.run).toHaveBeenCalledOnce());
+    const full = hostTurn(`${h.handles[0]!.id}:3`);
+    await h.continueTurn(0, full);
+    expect(full.run).not.toHaveBeenCalled(); expect(full.cancel).toHaveBeenCalled();
+    finish('done'); await running;
+    await h.bridge.accept(event('/new'));
+    const stale = hostTurn(`${h.handles[0]!.id}:4`);
+    await oldListener(stale);
+    expect(stale.run).not.toHaveBeenCalled(); expect(stale.cancel).toHaveBeenCalled();
+    await h.bridge.accept(group('restricted'));
+    expect(h.continuationListeners.size).toBe(0);
+    await h.bridge.stop();
+    const stopped = hostTurn(`${h.handles[0]!.id}:5`);
+    await oldListener(stopped);
+    expect(stopped.run).not.toHaveBeenCalled(); expect(stopped.cancel).toHaveBeenCalled();
+  });
+
+  it('does not acknowledge or continue an uncheckpointed host result', async () => {
+    const h = await setup({streaming: false});
+    await h.bridge.accept(event('first'));
+    h.handles[0]!.checkpoint.mockRejectedValueOnce(new DshRuntimeError('PERSISTENCE_FAILED'));
+    await h.continueTurn(0, hostTurn(`${h.handles[0]!.id}:2`, async () => 'unsafe uncheckpointed result'));
+    expect(h.sentText()).not.toContain('unsafe uncheckpointed result');
+    const later = hostTurn(`${h.handles[0]!.id}:3`);
+    await h.continueTurn(0, later);
+    expect(later.run).not.toHaveBeenCalled();
+    expect(later.cancel).toHaveBeenCalled();
+    expect(h.handles[0]!.cancel).toHaveBeenCalled();
+  });
+
+  it('keeps a continuation send with an unknown outcome to a single attempt', async () => {
+    const h = await setup({streaming: false});
+    await h.bridge.accept(event('first'));
+    h.transport.replyRich.mockRejectedValueOnce(new Error('unknown send outcome'));
+    const turn = hostTurn(`${h.handles[0]!.id}:2`);
+    await h.continueTurn(0, turn);
+    await h.continueTurn(0, turn);
+    expect(turn.run).toHaveBeenCalledOnce();
+    expect(h.transport.replyRich).toHaveBeenCalledTimes(2);
+    expect(h.transport.reply).not.toHaveBeenCalled();
+  });
+
+  it('skips a queued continuation already consumed by a preparing incoming reply', async () => {
+    const h = await setup();
+    await h.bridge.accept(event('first'));
+    const turn = {...hostTurn(`${h.handles[0]!.id}:2`), pending: false};
+    await h.continueTurn(0, turn);
+    expect(turn.run).not.toHaveBeenCalled();
+    expect(h.transport.replyCardEntity).toHaveBeenCalledOnce();
   });
 
   it('falls back to ordinary replies, and stops trying for a while, when a live card cannot be created', async () => {

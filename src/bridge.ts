@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, relative, sep } from 'node:path';
 import type { BotConfig, UserPolicy } from './config.js';
-import type { AgentPolicy, RuntimeSession, ModelSelection, ModelCatalog, ApprovalPrompt, QuestionAnswer, TurnObserver, TurnStreamEvent, UserQuestion, PermissionOption } from './dsh-runtime.js';
+import type { AgentPolicy, RuntimeSession, RuntimeContinuation, ModelSelection, ModelCatalog, ApprovalPrompt, QuestionAnswer, TurnObserver, TurnStreamEvent, UserQuestion, PermissionOption } from './dsh-runtime.js';
 import { DshRuntimeError } from './dsh-runtime.js';
 import type { MessageLedger } from './ledger.js';
 import { authorize, chunksByBytes, ownerKey, parseMessage, sessionKey, type IncomingMessage } from './message.js';
@@ -153,6 +153,8 @@ interface Lane {
   permissionSeen?: string;
   /** Where this harness chat keeps its permission choice, so a change can be kept even while unloading. */
   permissionContext?: {ownerKey: string; conversationKey: string};
+  continuationTarget?: RoutedMessage;
+  removeContinuationListener?: () => void;
 }
 const HELP = `直接把想做的事告诉我就好。
 
@@ -165,6 +167,7 @@ const HELP = `直接把想做的事告诉我就好。
 const HARNESS_HELP = `
 
 这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。发 /permission（或点底部菜单 设置 → 权限模式）可以切换权限，比如改成不再询问的「完全权限」。模型、思考深度和权限模式与电脑上的 Harness 同步。
+子智能体回传结果后，Harness 的后续处理也会自动回复到原话题。
 可直接发图片（需要宿主与模型支持图片输入）；在电脑设置中启用语音后，可发送 60 秒以内语音，识别成文字继续对话。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：创建新的飞书话题，在新话题里开始；旧话题和长期记忆保留
@@ -530,6 +533,11 @@ export class BotBridge {
       }
     }
     if (this.stopped || lane.generation !== generation) return;
+    await this.runTurn(message, lane, text);
+  }
+
+  /** Both incoming prompts and host-woken turns use the same delivery and persistence path. */
+  private async runTurn(message: RoutedMessage, lane: Lane, text: string, continuation?: RuntimeContinuation): Promise<void> {
     const controller = new AbortController();
     lane.controller = controller;
     const harness = message.chatType === 'p2p' && lane.user.directMode === 'harness';
@@ -545,10 +553,13 @@ export class BotBridge {
       if (!await card.finish(final)) this.audit({stage: 'live-card-unconfirmed', messageId: message.messageId});
     };
     try {
-      const input = await prepareMedia({...message, text}, this.transport, controller.signal,
+      const input = continuation ? {text} : await prepareMedia({...message, text}, this.transport, controller.signal,
         {images: this.config.imageInput !== false, voice: this.config.voiceInput === true, maxText: this.config.maxInputChars});
       text = input.text;
-      await this.ensureSession(message, lane);
+      if (!continuation) {
+        await this.ensureSession(message, lane);
+        this.bindContinuations(message, lane);
+      }
       if (controller.signal.aborted) {
         if (timedOut) await this.reply(message, TIMEOUT_TEXT);
         return;
@@ -574,8 +585,9 @@ export class BotBridge {
         ...(harness ? {approve: (prompt: ApprovalPrompt, signal: AbortSignal) => this.approve(message, prompt, signal),
           ask: (questions: UserQuestion[], signal: AbortSignal) => this.ask(message, questions, signal)} : {}),
       } : undefined;
-      const result = await (observer ? lane.session!.run(text, controller.signal, turnContext, observer)
-        : lane.session!.run(text, controller.signal, turnContext));
+      const result = await (continuation ? continuation.run(controller.signal, turnContext, observer)
+        : observer ? lane.session!.run(text, controller.signal, turnContext, observer)
+          : lane.session!.run(text, controller.signal, turnContext));
       // Native conversation data must be durable before acknowledging a turn.
       await lane.session!.checkpoint();
       await this.state.sessions.touch(this.sessionContext(message), lane.saved!.id);
@@ -600,6 +612,10 @@ export class BotBridge {
       this.audit({stage: 'replied', messageId: message.messageId});
     } catch (error) {
       clearTimeout(timer);
+      if (continuation && error instanceof DshRuntimeError && error.code === 'PERSISTENCE_FAILED') {
+        lane.unavailable = true;
+        lane.session?.cancel();
+      }
       if (error instanceof ArtifactDeliveryError) throw error;
       const known = error instanceof DshRuntimeError || error instanceof MemoryStoreError || error instanceof SessionStoreError || error instanceof ModelPreferencesError || error instanceof PresentationError || error instanceof MediaInputError;
       if (live) {
@@ -619,6 +635,45 @@ export class BotBridge {
       clearTimeout(timer);
       lane.controller = undefined;
     }
+  }
+
+  private bindContinuations(message: RoutedMessage, lane: Lane): void {
+    const session = lane.session;
+    if (!session?.onContinuation || !this.harness(message, lane)) return;
+    // Keep only server-authorized routing facts. A task's content never chooses
+    // a recipient, inherits a card capability, or becomes another user prompt.
+    lane.continuationTarget = {messageId: message.messageId, senderId: message.senderId, chatId: message.chatId,
+      chatType: message.chatType, threadId: message.threadId, text: '', laneKey: message.laneKey,
+      conversationKey: message.conversationKey, topic: message.topic};
+    lane.removeContinuationListener ??= session.onContinuation(turn => this.queueContinuation(lane, session, turn));
+  }
+
+  private queueContinuation(lane: Lane, session: RuntimeSession, turn: RuntimeContinuation): Promise<void> {
+    const target = lane.continuationTarget;
+    if (this.stopped || lane.unavailable || lane.session !== session || !target || !this.harness(target, lane)
+      || this.pending >= this.config.maxPending || lane.pending >= this.config.maxPendingPerSession) {
+      turn.cancel();
+      this.audit({stage: 'continuation-rejected'});
+      return Promise.resolve();
+    }
+    const message: RoutedMessage = {...target, requestId: `host:${turn.id}`};
+    const generation = lane.generation;
+    lane.pending++; this.pending++;
+    const job = lane.tail.then(async () => {
+      if (this.stopped || lane.generation !== generation || lane.session !== session || lane.unavailable || !turn.pending) return;
+      const claim = createHash('sha256').update(JSON.stringify([this.config.profile, this.config.botOpenId, message.requestId])).digest('hex');
+      if (!await this.ledger.claim(claim)) return;
+      await this.runTurn(message, lane, '', turn);
+    }).catch(() => {
+      this.audit({stage: 'continuation-failed', messageId: message.messageId});
+    }).finally(() => {
+      // Also releases a host waiting on prompt assembly if admission/context/delivery
+      // failed before the continuation could install its hooks.
+      turn.cancel();
+      lane.pending--; this.pending--; lane.lastUsed = Date.now();
+    });
+    lane.tail = job;
+    return job;
   }
 
   /** The model, thinking depth and permission mode a reply runs with, by name. */
@@ -1082,6 +1137,9 @@ export class BotBridge {
     try {
       await handle.dispose();
       this.failedDisposals.delete(handle);
+      lane.removeContinuationListener?.();
+      lane.removeContinuationListener = undefined;
+      lane.continuationTarget = undefined;
       lane.session = undefined;
       lane.unavailable = false;
     } catch (error) {this.failedDisposals.add(handle); throw error;}
@@ -1169,6 +1227,7 @@ export class BotBridge {
         lane.saved = await this.state.sessions.activate(conversation, target.id);
         lane.session = handle;
         lane.restored = true;
+        this.bindContinuations(message, lane);
       } catch (error) {
         lane.session = handle;
         await this.unload(lane).catch(() => undefined);
