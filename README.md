@@ -73,6 +73,7 @@ The connection's model check does not create a “飞书连接测试” conversa
 | In Feishu, you… | The assistant… |
 | --- | --- |
 | Send a request | Works on it with Harness's own tools (web search, reading pages, workspace files and more), streaming the reply live into one card; its thinking and tool steps are folded inside, step by step as in the app, and the card ends with the model, thinking depth and permission mode it used |
+| Let Harness delegate work to subagents | Sends follow-up results and updated deliverables back to the same topic when subagent messages wake Harness again, including after its first reply has finished |
 | Use several assistants | Manages up to 10 Feishu robots from one page, each with its own Agent preset, workspace, connection and history; pause a robot to edit its settings. Preset selection is available when the host provides it |
 | Send images in your private Harness chat | Reads PNG, JPEG, WebP or GIF through the host's durable attachments, when the selected model supports images; up to 4 images, 10 MB each |
 | Send a voice message | Use **开通语音权限** (authorize voice) for that robot, then pause, enable and save voice input. Transcribes up to 60 seconds of Chinese / English speech and replies in text; requires FFmpeg and a tenant plan that supports ASR |

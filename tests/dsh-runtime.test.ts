@@ -3,7 +3,7 @@ import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from 
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools';
 import { describe, expect, it, vi } from 'vitest';
-import { DshRuntime, DshRuntimeError, checkRuntimeCompatibility, type AgentPolicy, type ApprovalPrompt, type MemoryAccess, type MemoryEntryLike, type ModelSelection, type UserQuestion } from '../src/dsh-runtime.js';
+import { DshRuntime, DshRuntimeError, checkRuntimeCompatibility, type AgentPolicy, type ApprovalPrompt, type MemoryAccess, type MemoryEntryLike, type ModelSelection, type RuntimeContinuation, type UserQuestion } from '../src/dsh-runtime.js';
 
 const basePolicy: AgentPolicy = { cwd: '/tmp/dsh-lark-test', allowedTools: [] };
 
@@ -1057,6 +1057,11 @@ describe('harness channel mode', () => {
   };
   const toolCall = (id: string, name: string, args: string, turn = 1, step = 1) => ({type: 'assistant/chunk', data: {turn, step,
     chunk: {type: 'block-end', index: 0, block: {type: 'tool-call', id, name, arguments: args}}}});
+  const assembly = () => ({sections: [], contexts: [], tools: [], variables: {}});
+  const hostStep = (f: ReturnType<typeof fixture>, next: Listener, signal = new AbortController().signal) => {
+    f.emit({type: 'turn/start', data: {turn: 2}});
+    return listener(f, 'system-prompt/assemble')(assembly(), {agent: f.agent, signal}, next);
+  };
 
   it('keeps the host prompt, tools and presentation mode and adds only a channel section', async () => {
     const f = fixture();
@@ -1202,6 +1207,168 @@ describe('harness channel mode', () => {
     });
     await expect(session.run('question', new AbortController().signal, undefined, {stream: () => { throw new Error('card down'); }}))
       .resolves.toBe('ok');
+  });
+
+  it('consumes a host turn woken by a subagent message after the first reply has finished', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const results: unknown[] = [];
+    const streams: unknown[] = [];
+    session.onContinuation!(async turn => {
+      results.push(await turn.run(new AbortController().signal, undefined, {stream: event => streams.push(event)}));
+    });
+    f.agent.followup.mockImplementationOnce(() => {
+      listener(f, 'agent/assistant-stream')({agent: f.agent, frame: {type: 'start', turn: 1, step: 1}});
+      f.text('initial report');
+    });
+    await expect(session.run('review this', new AbortController().signal)).resolves.toBe('initial report');
+
+    // The host wakes the parent itself; Lark receives no new user message.
+    const next = vi.fn(async () => {
+      f.emit({type: 'assistant/chunk', data: {turn: 2, step: 1, chunk: {type: 'text-delta', index: 0, text: 'updated report'}}});
+      f.text('updated report');
+      f.emit({type: 'deliverables/presented', data: {turn: 2, callId: 'call_report', files: [{path: 'report.md', description: 'Revised report'}]}});
+      return {kind: 'enter', messages: []};
+    });
+    const idle = deferred();
+    f.agent.whenIdle.mockReturnValue(idle.promise);
+    await hostStep(f, next);
+    idle.resolve();
+    await vi.waitFor(() => expect(results).toHaveLength(1));
+    expect(results).toEqual([{text: 'updated report', artifacts: [], files: [{path: '/tmp/dsh-lark-test/report.md', description: 'Revised report'}]}]);
+    expect(streams).toEqual([{type: 'attempt'}, {type: 'text', text: 'updated report'}]);
+    expect(f.agent.followup).toHaveBeenCalledOnce();
+    await session.dispose();
+  });
+
+  it('waits for the channel lane before a continuation can stream, ask, or request approval', async () => {
+    const f = fixture();
+    Object.assign(f.prompt, {getSectionOrder: vi.fn(() => 100)});
+    const session = await f.runtime.create(harnessPolicy());
+    const available = deferred(), idle = deferred(), consumed = deferred();
+    const approve = vi.fn(async () => true);
+    const ask = vi.fn(async () => [{id: 'check', selected: ['yes']}]);
+    let token!: RuntimeContinuation;
+    session.onContinuation!(async turn => {
+      token = turn;
+      await available.promise;
+      expect(await turn.run(new AbortController().signal, {memoryText: 'current memory'}, {approve, ask})).toBe('revised');
+      consumed.resolve();
+    });
+    f.agent.whenIdle.mockReturnValue(idle.promise);
+    const next = vi.fn(async () => {
+      expect(await listener(f, 'approval/request')({toolName: 'bash'}, vi.fn())).toBe('allowed-once');
+      expect(await listener(f, 'user-questions/request')({questions: [{id: 'check', question: 'Check?', options: [{label: 'yes'}]}]}, vi.fn()))
+        .toEqual({answers: [{id: 'check', selected: ['yes']}]});
+      f.text('revised');
+      return {kind: 'enter', messages: []};
+    });
+    const step = hostStep(f, next);
+    await vi.waitFor(() => expect(token).toBeDefined());
+    expect(next).not.toHaveBeenCalled();
+    available.resolve();
+    await step;
+    await expect(session.run('overlap', new AbortController().signal)).rejects.toMatchObject({code: 'BUSY'});
+    idle.resolve();
+    await consumed.promise;
+    await expect(token.run(new AbortController().signal)).rejects.toMatchObject({code: 'CANCELLED'});
+    expect(f.agent.followup).not.toHaveBeenCalled();
+    await session.dispose();
+  });
+
+  it('includes a host wake during incoming preparation in that incoming reply without deadlocking its queued consumer', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const idle = deferred(), queued = deferred(), consumed = deferred();
+    let token!: RuntimeContinuation;
+    session.onContinuation!(async turn => {
+      token = turn;
+      await queued.promise;
+      expect(turn.pending).toBe(false);
+      consumed.resolve();
+    });
+    const next = vi.fn(async () => {f.text('subagent finding'); return assembly();});
+    const host = hostStep(f, next);
+    await vi.waitFor(() => expect(token).toBeDefined());
+    expect(token.pending).toBe(true);
+    f.agent.whenIdle.mockReturnValue(idle.promise);
+    const incoming = session.run('follow-up question', new AbortController().signal);
+    await host;
+    f.text('answer to the follow-up');
+    idle.resolve();
+    await expect(incoming).resolves.toBe('subagent finding\n\nanswer to the follow-up');
+    queued.resolve();
+    await consumed.promise;
+    expect(f.agent.followup).toHaveBeenCalledOnce();
+    expect(f.agent.cancel).not.toHaveBeenCalled();
+    await session.dispose();
+  });
+
+  it.each(['declined', 'listener-failure', 'invalid-context', 'cancelled-consumer', 'cancelled-host', 'disposed'] as const)
+    ('releases a queued continuation when %s without running its model step', async mode => {
+      const f = fixture();
+      const session = await f.runtime.create(harnessPolicy());
+      const hostSignal = new AbortController();
+      session.onContinuation!(async turn => {
+        if (mode === 'listener-failure') throw new Error('private detail');
+        if (mode === 'declined') return;
+        if (mode === 'cancelled-host') {hostSignal.abort(); return;}
+        if (mode === 'disposed') {await session.dispose(); return;}
+        const controller = new AbortController();
+        if (mode === 'cancelled-consumer') controller.abort();
+        await turn.run(controller.signal, {memoryText: 'x'.repeat(100_001)});
+      });
+      const next = vi.fn();
+      await expect(hostStep(f, next, hostSignal.signal)).rejects.toMatchObject({code: 'CANCELLED'});
+      expect(next).not.toHaveBeenCalled();
+      await session.dispose();
+    });
+
+  it('keeps foreign agents and ordinary in-flight steps out of continuation admission', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const consume = vi.fn(async () => undefined);
+    const remove = session.onContinuation!(consume);
+    const next = vi.fn(async () => ({kind: 'enter'}));
+    await listener(f, 'system-prompt/assemble')(assembly(), {agent: {session: {id: f.session.id}}, signal: new AbortController().signal}, next);
+    f.agent.whenIdle.mockImplementationOnce(async () => {
+      await hostStep(f, next);
+    });
+    await session.run('initial', new AbortController().signal);
+    expect(consume).not.toHaveBeenCalled();
+    remove();
+    await hostStep(f, next);
+    expect(next).toHaveBeenCalledTimes(3);
+    expect(consume).not.toHaveBeenCalled();
+    const restricted = await fixture().runtime.create(basePolicy);
+    expect(restricted.onContinuation).toBeUndefined();
+    await Promise.all([session.dispose(), restricted.dispose()]);
+  });
+
+  it('keeps a continuation arriving during the prior checkpoint out of the prior answer', async () => {
+    const f = fixture();
+    const session = await f.runtime.create(harnessPolicy());
+    const checkpoint = deferred(), idle = deferred(), consumed = deferred();
+    f.flush.mockImplementationOnce(async () => {await checkpoint.promise; return true;});
+    f.agent.followup.mockImplementationOnce(() => f.text('initial'));
+    const first = session.run('review', new AbortController().signal);
+    await vi.waitFor(() => expect(f.flush).toHaveBeenCalled());
+    f.agent.whenIdle.mockReturnValue(idle.promise);
+    const results: unknown[] = [];
+    session.onContinuation!(async turn => {
+      results.push(await turn.run(new AbortController().signal));
+      consumed.resolve();
+    });
+    const next = vi.fn(async () => {f.text('late result'); return {kind: 'enter'};});
+    const step = hostStep(f, next);
+    expect(next).not.toHaveBeenCalled();
+    checkpoint.resolve();
+    await expect(first).resolves.toBe('initial');
+    await step;
+    idle.resolve();
+    await consumed.promise;
+    expect(results).toEqual(['late result']);
+    await session.dispose();
   });
 
   it('returns reasoning apart from the answer and resolves host-presented files against the workspace', async () => {
@@ -1433,9 +1600,13 @@ describe('harness model shared with the App', () => {
     // A pick made in the App on this session wins, and routes the next request.
     host.record.pending = {provider: 'host-provider', model: 'app-pick', reasoningEffort: 'deep'};
     expect(session.modelSelection!()).toEqual({provider: 'host-provider', model: 'app-pick', reasoningEffort: 'deep'});
-    const assemble = f.scopedOn.mock.calls.find(([name]) => name === 'system-prompt/assemble')![1];
+    let assemble = async () => ({variables: {}});
+    for (const [, listener] of f.scopedOn.mock.calls.filter(([name]) => name === 'system-prompt/assemble').reverse()) {
+      const next = assemble;
+      assemble = () => listener({}, {}, next);
+    }
     const request = f.scopedOn.mock.calls.find(([name]) => name === 'agent/request')![1];
-    await assemble({}, {}, async () => ({variables: {}}));
+    await assemble();
     expect(await request({}, async () => ({provider: 'x', model: 'x', maxTokens: 10})))
       .toEqual({provider: 'host-provider', model: 'app-pick', reasoningEffort: 'deep', maxTokens: 10});
   });

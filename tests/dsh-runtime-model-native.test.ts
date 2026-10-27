@@ -3,7 +3,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {describe, expect, it, vi} from 'vitest';
-import type {ModelSelection, MemoryAccess} from '../src/dsh-runtime.js';
+import type {ModelSelection, MemoryAccess, RuntimeContinuation, TurnStreamEvent} from '../src/dsh-runtime.js';
 
 const privateMemory = (): MemoryAccess => ({privateChat: true, list: async () => [], search: async () => [],
   remember: async () => {throw new Error('not requested');}, forget: async () => false});
@@ -72,6 +72,81 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
         symbols: cordis.symbols, persistenceApi: await module('dsh-session-persistence'),
         close: () => root.fiber.dispose()};
     }
+
+    it('consumes late agent messages through the real host inbox without submitting another user turn', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'lark-host-continuation-'));
+      const host = await createHost(directory);
+      try {
+        const session = await host.adapter.create({cwd: directory, allowedTools: [], provider: 'offline', model: 'plain',
+          mode: 'harness', memory: privateMemory()});
+        const results: unknown[] = [], failures: unknown[] = [], streams: TurnStreamEvent[] = [];
+        let continuationCount = 0;
+        session.onContinuation(async (turn: RuntimeContinuation) => {
+          try {results.push(await turn.run(new AbortController().signal, {memoryText: `fresh continuation memory ${++continuationCount}`},
+            {stream: event => streams.push(event)}));}
+          catch (error) {failures.push(error);}
+        });
+        await expect(session.run('initial review', new AbortController().signal)).resolves.toBe('offline answer');
+        const agent = host.root.get('agents').get(session.id);
+        for (const [index, answer] of ['review findings', 'revised report'].entries()) {
+          if (index === 1) host.nextRequest(async () => {
+            agent.session.append('deliverables/presented', {turn: 3, callId: 'late_report',
+              files: [{path: 'report.md', description: 'Revised report'}]});
+          });
+          host.nextStream([
+            {type: 'text-delta', index: 0, text: answer},
+            {type: 'block-end', index: 0, block: {type: 'text', text: answer}},
+            {type: 'finish', reason: {kind: 'completed'}},
+          ]);
+          agent.send(host.llmApi.createUserMessage({source: {kind: 'agent-message', form: 'relay',
+            senderSessionId: '00000000-0000-4000-8000-000000000099'}, content: [{type: 'text', text: `subagent result ${index}`}]}), 'next-step', true);
+          await agent.whenIdle();
+          await vi.waitFor(() => expect(results.length + failures.length).toBe(index + 1));
+        }
+        expect(failures).toEqual([]);
+        expect(results).toEqual(['review findings', {text: 'revised report', artifacts: [],
+          files: [{path: join(directory, 'report.md'), description: 'Revised report'}]}]);
+        expect(streams).toEqual([{type: 'attempt'}, {type: 'text', text: 'review findings'},
+          {type: 'attempt'}, {type: 'text', text: 'revised report'}]);
+        expect(host.requests).toHaveLength(3);
+        expect(JSON.stringify(host.requests[1])).toContain('fresh continuation memory 1');
+        expect(JSON.stringify(host.requests[2])).toContain('fresh continuation memory 2');
+        const events = typeof agent.session.snapshotEvents === 'function' ? agent.session.snapshotEvents() : agent.session.events;
+        const messages = events.filter((event: {type: string}) => event.type === 'user/message');
+        expect(messages.filter((event: {data: {source: {kind: string}}}) => event.data.source.kind === 'user')).toHaveLength(1);
+        expect(messages.filter((event: {data: {source: {kind: string}}}) => event.data.source.kind === 'agent-message')).toHaveLength(2);
+        await session.dispose();
+      } finally {await host.close(); await rm(directory, {recursive: true, force: true});}
+    });
+
+    it('includes a host message arriving during incoming preparation without losing the new question', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'lark-host-incoming-continuation-'));
+      const host = await createHost(directory);
+      let release!: () => void;
+      const queued = new Promise<void>(resolve => {release = resolve;});
+      try {
+        const session = await host.adapter.create({cwd: directory, allowedTools: [], provider: 'offline', model: 'plain',
+          mode: 'harness', memory: privateMemory()});
+        let continuation: RuntimeContinuation | undefined;
+        session.onContinuation(async (turn: RuntimeContinuation) => {continuation = turn; await queued;});
+        await session.run('initial review', new AbortController().signal);
+        const agent = host.root.get('agents').get(session.id);
+        agent.send(host.llmApi.createUserMessage({source: {kind: 'agent-message', form: 'relay',
+          senderSessionId: '00000000-0000-4000-8000-000000000099'}, content: [{type: 'text', text: 'subagent finding'}]}), 'next-step', true);
+        await vi.waitFor(() => expect(continuation?.pending).toBe(true));
+        // A queued settings update is safe while the host is paused before its first request.
+        session.setModelSelection({provider: 'offline', model: 'reasoned', reasoningEffort: 'deep'});
+        await expect(session.run('a new question', new AbortController().signal))
+          .resolves.toBe('offline answer\n\noffline answer');
+        expect(continuation?.pending).toBe(false);
+        expect(host.requests).toHaveLength(3);
+        expect(host.requests.slice(1).map((request: ModelSelection) => [request.model, request.reasoningEffort]))
+          .toEqual([['reasoned', 'deep'], ['reasoned', 'deep']]);
+        expect(JSON.stringify(host.requests.at(-1))).toContain('a new question');
+        release();
+        await session.dispose();
+      } finally {release(); await host.close(); await rm(directory, {recursive: true, force: true});}
+    });
 
     it.skipIf(family !== 'legacy')('persists native image input and restores its bytes on the legacy host', async () => {
       const directory = await mkdtemp(join(tmpdir(), 'lark-legacy-image-'));
