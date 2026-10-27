@@ -35,7 +35,7 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) 会调用 pnpm，需先装好 pnpm 并确保它在 PATH 中：
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.5.0 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.5.1 --allow-build=protobufjs
 ```
 
 然后重启 `dsh web`。
