@@ -559,6 +559,11 @@ export class BotBridge {
       if (!continuation) {
         await this.ensureSession(message, lane);
         this.bindContinuations(message, lane);
+      } else {
+        // A sibling topic may have changed the private chat's choice while
+        // this session was idle. Sync before releasing the host's assembly gate.
+        await this.adoptPermission(lane);
+        await this.applyPermission(message, lane, lane.session!, false);
       }
       if (controller.signal.aborted) {
         if (timedOut) await this.reply(message, TIMEOUT_TEXT);

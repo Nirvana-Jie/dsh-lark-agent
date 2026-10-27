@@ -465,6 +465,55 @@ describe('harness channel help', () => {
 describe('harness channel permission switch', () => {
   const rich = (h: Awaited<ReturnType<typeof setup>>) => h.transport.replyRich.mock.calls.map(call => call[1]);
 
+  it.each(['sibling topic', 'main chat'] as const)('applies a stricter choice from the %s before a continuation runs', async source => {
+    const h = await setup({topics: true, permissions: true, streaming: false});
+    await h.bridge.accept(event('task A'));
+    await h.bridge.accept(event('/permission use danger-full-access', {thread_id: 'omt_topic_1'}));
+    expect(h.handles[0]!.permissionState!()!.current).toBe('danger-full-access');
+    if (source === 'sibling topic') await h.bridge.accept(event('task B'));
+    await h.bridge.accept(event('/permission use read-only', source === 'sibling topic' ? {thread_id: 'omt_topic_2'} : {}));
+    // The command only changed its own lane. A has not received another user message.
+    expect(h.handles[0]!.permissionState!()!.current).toBe('danger-full-access');
+    const observed: string[] = [];
+    const turn = hostTurn(`${h.handles[0]!.id}:2`, async () => {
+      observed.push(h.handles[0]!.permissionState!()!.current);
+      return 'continued with current permissions';
+    });
+    await h.continueTurn(0, turn);
+    expect(turn.run).toHaveBeenCalledOnce();
+    expect(observed).toEqual(['read-only']);
+    expect(h.sentText().at(-1)).toBe('continued with current permissions');
+    expect(h.handles[0]!.setPermission!.mock.calls.map(call => call[0])).toEqual(['danger-full-access', 'read-only']);
+  });
+
+  it('keeps an App permission change before applying the private chat choice to a continuation', async () => {
+    const h = await setup({topics: true, permissions: true, streaming: false});
+    await h.bridge.accept(event('task A'));
+    await h.bridge.accept(event('/permission use danger-full-access', {thread_id: 'omt_topic_1'}));
+    h.handles[0]!.changeInApp!('read-only');
+    const turn = hostTurn(`${h.handles[0]!.id}:2`);
+    await h.continueTurn(0, turn);
+    expect(h.handles[0]!.permissionState!()!.current).toBe('read-only');
+    expect(h.handles[0]!.setPermission).toHaveBeenCalledExactlyOnceWith('danger-full-access');
+    await h.bridge.accept(event('task B'));
+    expect(h.handles[1]!.setPermission).toHaveBeenCalledExactlyOnceWith('read-only');
+    expect(turn.run).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a continuation before model work when the current permission choice cannot be applied', async () => {
+    const h = await setup({topics: true, permissions: true, streaming: false});
+    await h.bridge.accept(event('task A'));
+    await h.bridge.accept(event('/permission use danger-full-access', {thread_id: 'omt_topic_1'}));
+    await h.bridge.accept(event('/permission use read-only'));
+    h.handles[0]!.setPermission!.mockImplementationOnce(() => {throw new DshRuntimeError('PERMISSION_UNAVAILABLE');});
+    const turn = hostTurn(`${h.handles[0]!.id}:2`);
+    await h.continueTurn(0, turn);
+    expect(turn.run).not.toHaveBeenCalled();
+    expect(turn.cancel).toHaveBeenCalled();
+    expect(h.handles[0]!.permissionState!()!.current).toBe('danger-full-access');
+    expect(h.sentText().at(-1)).toBe(new DshRuntimeError('PERMISSION_UNAVAILABLE').message);
+  });
+
   it('switches on the clicked card itself, with a second confirmation for full access, and keeps it for new sessions', async () => {
     const h = await setup({streaming: false, permissions: true});
     await h.bridge.accept(event('hello'));
