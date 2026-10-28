@@ -1,5 +1,5 @@
 import type {TurnStreamEvent} from './dsh-runtime.js';
-import {cardMarkdown, markdownBlocks, plainLabel} from './replies.js';
+import {cardMarkdown, markdownBlocks, plainLabel, replyActionButton, type ReplyAction} from './replies.js';
 
 export interface LiveCardTransport {
   createCardEntity(card: Record<string, unknown>): Promise<string>;
@@ -21,6 +21,7 @@ export interface LiveReplyFinal {
   reasoning?: string;
   /** Trusted application text shown under the answer. */
   note?: string;
+  action?: ReplyAction;
 }
 
 type Step = {id: number; kind: 'reasoning'; text: string}
@@ -117,6 +118,7 @@ export class LiveReply {
   private mark = {steps: 0, tail: -1, answer: 0};
   private tools = 0;
   private note?: string;
+  private finalAction?: ReplyAction;
   private footer?: string;
   private cardId?: string;
   private sequence = 0;
@@ -230,6 +232,7 @@ export class LiveReply {
     if (final.reasoning && !this.steps.some(step => step.kind === 'reasoning')) this.steps.unshift({id: this.nextStep++, kind: 'reasoning', text: final.reasoning});
     for (const step of this.steps) if (step.kind === 'tool' && step.state === 'running') step.state = final.phase === 'done' ? 'done' : 'failed';
     this.note = final.note;
+    this.finalAction = final.action;
     const card = this.finalCard();
     if (!this.cardId) return false;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -428,6 +431,7 @@ export class LiveReply {
     if (final && note) elements.push({tag: 'markdown', element_id: 'note', content: grey(cardMarkdown(note)), text_size: 'notation'});
     if (this.footer) elements.push({tag: 'markdown', element_id: 'footer', text_size: 'notation',
       icon: {tag: 'standard_icon', token: 'robot_outlined', color: 'grey'}, content: grey(cardMarkdown(this.footer))});
+    if (final && this.finalAction) elements.push({...replyActionButton(this.finalAction), element_id: 'topic_settings'});
     const summary = final ? plainLabel(final.answer || this.note || '回复', 60) || '回复' : this.answer ? '正在回复…' : '正在思考…';
     return {
       schema: '2.0',

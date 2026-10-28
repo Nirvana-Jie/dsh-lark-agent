@@ -22,6 +22,14 @@ afterEach(async () => {
 });
 
 describe('native topic bindings', () => {
+  it('retains a bounded entry title before the first native session exists and accepts older untitled bindings', async () => {
+    const {directory, store} = await fixture();
+    await store.record({...binding, title: 'A topic with no prompt yet'});
+    await store.record({...binding, sessionId: '123456abcdef'});
+    expect(await (await TopicStore.open(directory)).get(binding, binding.threadId)).toMatchObject({title: 'A topic with no prompt yet', sessionId: '123456abcdef'});
+    for (const title of ['', 'x'.repeat(81), 'line\nbreak']) expect(() => store.record({...binding, title})).toThrow('话题参数无效');
+  });
+
   it('publishes private durable bindings and adds the checkpointed session once', async () => {
     const {directory, store} = await fixture();
     await store.record(binding);

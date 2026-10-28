@@ -146,7 +146,7 @@ describe('one native Lark topic per session', () => {
     const picker = component(found, 'select_static')!;
     expect(picker.options).toMatchObject([{value: first.id, text: {content: expect.stringContaining(first.title)}}]);
     expect(found.kind === 'card' && found.fallbackText).toContain('第 1 / 1 页');
-    const selected = click(controlToken(picker), {action_tag: 'select_static', action_name: 'dsh_session_picker', option: first.id});
+    const selected = click(controlToken(picker), {action_tag: 'select_static', option: first.id});
     await h.bridge.accept(selected);
     expect(h.openTopic).toHaveBeenCalledOnce(); expect(h.create).not.toHaveBeenCalled(); expect(h.resume).not.toHaveBeenCalled();
     const result = h.updateFeedback.mock.calls.at(-1)![1];
@@ -157,7 +157,7 @@ describe('one native Lark topic per session', () => {
     await h.bridge.accept({...selected, event_id: randomUUID()});
     expect(h.openTopic).toHaveBeenCalledOnce(); // a fresh event cannot reuse a consumed selection
     expect(h.replyRich).toHaveBeenCalledTimes(sent);
-    expect(h.updateFeedback.mock.calls.every(([id]) => id === 'om_history_picker')).toBe(true);
+    expect(h.updateFeedback.mock.calls.filter(([id]) => id !== 'om_anchor_1').every(([id]) => id === 'om_history_picker')).toBe(true);
     await h.bridge.accept(click(controlToken(formControl(component(result, 'form')!, 'button')),
       {action_name: 'dsh_sessions_search', form_value: JSON.stringify({query: ''})}));
     const cleared = h.updateFeedback.mock.calls.at(-1)![1];
@@ -223,6 +223,7 @@ describe('one native Lark topic per session', () => {
     const picker = component(card, 'select_static')!;
     await h.state.memories.setGroupShared(privateContext, memory.id, false);
     const opened = h.openTopic.mock.calls.length;
+    h.updateFeedback.mockClear();
     await h.bridge.accept({type: 'card.action.trigger', event_id: randomUUID(), operator_id: 'ou_alice', chat_id: 'oc_group',
       message_id: 'om_group_history', action_tag: 'select_static', action_name: 'dsh_session_picker', option: own.sessionId,
       action_value: JSON.stringify({token: controlToken(picker)})});
@@ -326,7 +327,7 @@ describe('one native Lark topic per session', () => {
     expect(h.openTopic).toHaveBeenCalledOnce();
   });
 
-  it('keeps a private chat permission choice and App changes across native topics', async () => {
+  it('migrates the private chat choice as a default and isolates later topic and App changes', async () => {
     const h = await fixture();
     const modes: Array<{current: string}> = [];
     h.create.mockImplementation(async () => {
@@ -343,15 +344,15 @@ describe('one native Lark topic per session', () => {
     expect(modes[0]?.current).toBe('read-only');
     modes[0]!.current = 'full'; // The App changed the first native session.
     await h.bridge.accept(h.event('two'));
-    expect(modes[1]?.current).toBe('full');
-    expect(await h.state.permissionPreferences.get(h.legacyContext())).toBe('full');
+    expect(modes[1]?.current).toBe('read-only');
+    expect(await h.state.permissionPreferences.get(h.legacyContext())).toBe('read-only');
     const first = (await h.topics())[0]!;
     await h.bridge.accept(h.event('/permission use workspace', {thread_id: first.threadId}));
     await h.bridge.accept(h.event('three'));
-    expect(modes[2]?.current).toBe('workspace');
+    expect(modes[2]?.current).toBe('read-only');
     const second = (await h.topics())[1]!;
     await h.bridge.accept(h.event('back to two', {thread_id: second.threadId}));
-    expect(modes[1]?.current).toBe('workspace');
+    expect(modes[1]?.current).toBe('read-only');
   });
 
   it.each(['p2p', 'group'] as const)('inherits a %s model choice into each fresh topic without changing existing topics', async type => {
@@ -369,7 +370,7 @@ describe('one native Lark topic per session', () => {
     await h.bridge.accept(make('/new', {thread_id: first.threadId}));
     const next = (await h.topics(source))[1]!;
     await h.bridge.accept(make('two', {thread_id: next.threadId}));
-    expect(h.create.mock.calls[1]?.[0]).toMatchObject(perTopic);
+    expect(h.create.mock.calls[1]?.[0]).toMatchObject(type === 'p2p' ? initial : perTopic);
     const entry = {...legacy, conversationKey: createHash('sha256').update(JSON.stringify([legacy.conversationKey, 'lark-entry-v1'])).digest('hex')};
     await h.state.modelPreferences.set(entry, {provider: 'offline', model: 'new-main-choice'});
     await h.bridge.accept(make('three'));

@@ -1542,6 +1542,7 @@ describe('harness permission presets', () => {
     expect(service.set).toHaveBeenCalledExactlyOnceWith(f.session, 'danger-full-access');
     expect(() => session.setPermission!('Bad Value')).toThrow(expect.objectContaining({code: 'PERMISSION_UNAVAILABLE'}));
     expect(f.runtime.permissionOptions().map(option => option.id)).toEqual(['read-only', 'workspace-write', 'danger-full-access']);
+    expect(f.runtime.permissionDefault()).toBe('workspace-write');
   });
 
   it('offers no permission switch to a restricted session or a host without a catalog', async () => {

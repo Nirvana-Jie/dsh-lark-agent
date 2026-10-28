@@ -38,6 +38,19 @@ afterEach(async () => {
 });
 
 describe('conversation model preferences', () => {
+  it('saves model and permission as one revision, preserves permissions during model mirroring, and rejects stale mixed edits', async () => {
+    const {directory, store} = await fixture();
+    const first = await store.set(alice, initial, {expectedRevision: null, permissionPreset: 'read-only'});
+    const second = await store.set(alice, other, {expectedRevision: first.revision, permissionPreset: 'workspace-write'});
+    await expect(store.set(alice, initial, {expectedRevision: first.revision, permissionPreset: 'danger-full-access'})).rejects.toMatchObject({code: 'CONFLICT'});
+    expect(await store.get(alice)).toEqual(second);
+    const mirrored = await store.set(alice, initial, {expectedRevision: second.revision});
+    expect(mirrored.permissionPreset).toBe('workspace-write');
+    expect(await (await ModelPreferencesStore.open(directory)).get(alice)).toEqual(mirrored);
+    await expect(store.set(alice, other, {permissionPreset: '../invalid'})).rejects.toMatchObject({code: 'INVALID_INPUT'});
+    expect(await store.get(alice)).toEqual(mirrored);
+  });
+
   it('starts unset and restores exact model selection and revision after restart', async () => {
     const {directory, store} = await fixture();
     expect(await store.get(alice)).toBeUndefined();

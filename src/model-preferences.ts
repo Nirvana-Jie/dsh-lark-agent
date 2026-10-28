@@ -6,8 +6,9 @@ import type {ModelSelection} from './dsh-runtime.js';
 
 /** Both keys must be derived by the bridge from the verified sender and chat. */
 export interface ModelPreferenceContext {ownerKey: string; conversationKey: string}
-export interface ModelPreferenceRecord {selection: ModelSelection; revision: string}
-export interface ModelPreferenceWriteOptions {expectedRevision?: string | null}
+/** Model and permission are one durable settings snapshot when both are available. */
+export interface ModelPreferenceRecord {selection: ModelSelection; revision: string; permissionPreset?: string}
+export interface ModelPreferenceWriteOptions {expectedRevision?: string | null; permissionPreset?: string}
 interface StoredPreference extends ModelPreferenceContext, ModelPreferenceRecord {}
 interface PreferenceDocument {version: 1; entries: StoredPreference[]}
 
@@ -35,6 +36,7 @@ const MAX_TOTAL_ENTRIES = 10_000;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const REVISION = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+const PRESET = /^[a-z][a-z0-9-]{0,39}$/;
 
 function object(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
@@ -72,7 +74,8 @@ function selectionSnapshot(value: unknown): ModelSelection {
     ...(input.reasoningEffort !== undefined ? {reasoningEffort: input.reasoningEffort} : {})};
 }
 function publicRecord(value: StoredPreference): ModelPreferenceRecord {
-  return {selection: {...value.selection}, revision: value.revision};
+  return {selection: {...value.selection}, revision: value.revision,
+    ...(value.permissionPreset === undefined ? {} : {permissionPreset: value.permissionPreset})};
 }
 function identityKey(context: ModelPreferenceContext): string {
   return JSON.stringify([context.ownerKey, context.conversationKey]);
@@ -86,8 +89,9 @@ function parseDocument(value: unknown): PreferenceDocument {
     const owners = new Map<string, number>();
     const entries = input.entries.map((raw): StoredPreference => {
       const row = object(raw);
-      if (!row || !onlyKeys(row, ['ownerKey', 'conversationKey', 'selection', 'revision'])
-        || typeof row.revision !== 'string' || !REVISION.test(row.revision)) throw new Error();
+      if (!row || !onlyKeys(row, ['ownerKey', 'conversationKey', 'selection', 'revision', 'permissionPreset'])
+        || typeof row.revision !== 'string' || !REVISION.test(row.revision)
+        || (row.permissionPreset !== undefined && (typeof row.permissionPreset !== 'string' || !PRESET.test(row.permissionPreset)))) throw new Error();
       const context = contextSnapshot(row as unknown as ModelPreferenceContext);
       const key = identityKey(context);
       if (identities.has(key)) throw new Error();
@@ -95,7 +99,8 @@ function parseDocument(value: unknown): PreferenceDocument {
       const count = (owners.get(context.ownerKey) ?? 0) + 1;
       if (count > MAX_OWNER_ENTRIES) throw new Error();
       owners.set(context.ownerKey, count);
-      return {...context, selection: selectionSnapshot(row.selection), revision: row.revision};
+      return {...context, selection: selectionSnapshot(row.selection), revision: row.revision,
+        ...(typeof row.permissionPreset === 'string' ? {permissionPreset: row.permissionPreset} : {})};
     });
     return {version: 1, entries};
   } catch {throw new ModelPreferencesError('CORRUPT');}
@@ -188,8 +193,10 @@ export class ModelPreferencesStore {
     const identity = contextSnapshot(context);
     const selected = selectionSnapshot(selection);
     const optionRecord = object(options);
-    if (!optionRecord || !onlyKeys(optionRecord, ['expectedRevision'])) throw new ModelPreferencesError('INVALID_INPUT');
+    if (!optionRecord || !onlyKeys(optionRecord, ['expectedRevision', 'permissionPreset'])) throw new ModelPreferencesError('INVALID_INPUT');
     const expected = optionRecord.expectedRevision;
+    const permission = optionRecord.permissionPreset;
+    if (permission !== undefined && (typeof permission !== 'string' || !PRESET.test(permission))) throw new ModelPreferencesError('INVALID_INPUT');
     if (expected !== undefined && expected !== null && (typeof expected !== 'string' || !REVISION.test(expected))) {
       throw new ModelPreferencesError('INVALID_INPUT');
     }
@@ -201,7 +208,9 @@ export class ModelPreferencesStore {
         || this.document.entries.filter(entry => entry.ownerKey === identity.ownerKey).length >= MAX_OWNER_ENTRIES)) {
         throw new ModelPreferencesError('CAPACITY');
       }
-      const value: StoredPreference = {...identity, selection: selected, revision: randomUUID()};
+      const permissionPreset = permission ?? previous?.permissionPreset;
+      const value: StoredPreference = {...identity, selection: selected, revision: randomUUID(),
+        ...(permissionPreset === undefined ? {} : {permissionPreset})};
       const entries = this.document.entries.map(entry => entry === previous ? value : entry);
       if (!previous) entries.push(value);
       const draft: PreferenceDocument = {version: 1, entries};

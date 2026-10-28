@@ -95,17 +95,19 @@ describe('confirmed native topic creation', () => {
       .toEqual({messageId: 'om_open', threadId: 'omt_example', link: 'https://applink.feishu.cn/client/thread/open?threadId=omt_example'});
     expect(calls[0]?.args).toEqual(['--profile', 'test-bot', 'api', 'POST', '/open-apis/im/v1/messages/om_source/reply',
       '--data', '-', '--as', 'bot', '--format', 'json']);
-    expect(JSON.parse(calls[0]!.input)).toMatchObject({reply_in_thread: true, uuid: 'topic:open', msg_type: 'text'});
-    expect(JSON.parse(JSON.parse(calls[0]!.input).content).text).not.toContain('dsh-lark-agent');
+    expect(JSON.parse(calls[0]!.input)).toMatchObject({reply_in_thread: true, uuid: 'topic:open', msg_type: 'interactive'});
+    expect(JSON.parse(JSON.parse(calls[0]!.input).content)).toMatchObject({schema: '2.0', header: {title: {content: 'a $(text) title'}}});
     expect(calls[0]!.args.join(' ')).not.toContain('$(text)');
     expect(calls[1]?.args).toContain('+messages-mget');
   });
 
   it('creates a sibling root for menu/card events, then opens the confirmed root as a topic', async () => {
     const calls = commands([receipt({message_id: 'om_root', chat_id: 'oc_chat'}),
-      receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}), readLink]);
+      receipt({message_id: 'om_open', chat_id: 'oc_chat', thread_id: 'omt_example'}),
+      receipt({messages: [{message_id: 'om_root', thread_app_link: 'https://applink.feishu.cn/client/thread/open?threadId=omt_example'}]})]);
     const cli = new LarkCli({profile: 'test-bot'});
-    await cli.openTopic({chatId: 'oc_chat'}, 'new topic', {idempotencyKey: 'topic'});
+    expect(await cli.openTopic({chatId: 'oc_chat'}, 'new topic', {idempotencyKey: 'topic'}))
+      .toEqual({messageId: 'om_root', threadId: 'omt_example', link: 'https://applink.feishu.cn/client/thread/open?threadId=omt_example'});
     const root = JSON.parse(calls[0]!.input);
     expect(root).toMatchObject({receive_id: 'oc_chat', uuid: 'topic:root', msg_type: 'interactive'});
     expect(JSON.parse(root.content)).toMatchObject({schema: '2.0', header: {title: {content: 'new topic'}}});
@@ -117,6 +119,7 @@ describe('confirmed native topic creation', () => {
     expect(calls[1]?.args).toContain('/open-apis/im/v1/messages/om_root/reply');
     expect(JSON.parse(calls[1]!.input).reply_in_thread).toBe(true);
     expect(JSON.parse(JSON.parse(calls[1]!.input).content).text).not.toContain('dsh-lark-agent');
+    expect(calls[2]?.args).toContain('om_root');
     expect(calls).toHaveLength(3); // entry card, one threaded reply, optional read; no standalone confirmation
   });
 
