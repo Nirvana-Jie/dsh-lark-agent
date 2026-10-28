@@ -30,6 +30,7 @@ const HEX_ID = /^[a-f0-9]{12}$/;
 const COMMAND = /^(?:\/(?:help|status|sessions|memory|new|model|thinking|results)|\/(?:model|thinking) (?:use [a-f0-9]{16}|page [0-9]{1,4})|\/memory (?:global|chat|show [a-f0-9]{12})|\/(?:resume|forget|result|publish|answer|approve|deny|reply) [a-f0-9]{12}|\/choose [a-f0-9]{12} [0-9]{1,2}|\/permission(?: use [a-z][a-z0-9-]{0,39})?)$/;
 const PAYLOAD_KEYS = ['version', 'namespace', 'issuedAt', 'expiresAt', 'nonce', 'binding'];
 const BINDING_KEYS = ['ownerId', 'chatId', 'chatType', 'threadId', 'sourceMessageId', 'command', 'expectedSessionId', 'expectedModelRevision'];
+const SETTINGS_COMMAND = /^\/settings(?: defaults| topics(?: [0-9]{1,3})?| pick [0-9]{1,3}| draft [a-f0-9]{12} [0-9]{1,6} (?:model|thinking|permission|save|copy|cancel|models [0-9]{1,3}))?$/;
 
 function record(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -58,7 +59,7 @@ function binding(value: unknown): ActionBinding | undefined {
     || !(value.threadId === '' || validId(value.threadId, 'om') || validId(value.threadId, 'omt'))
     || !(validId(value.sourceMessageId, 'om') || (typeof value.sourceMessageId === 'string' && /^menu:[a-zA-Z0-9_-]{1,128}$/.test(value.sourceMessageId)))
     || typeof value.command !== 'string' || /[\u0000-\u001f\u007f]/.test(value.command)
-    || !(COMMAND.test(value.command) || value.command === '/sessions search' || sessionViewCommandParse(value.command))
+    || !(COMMAND.test(value.command) || SETTINGS_COMMAND.test(value.command) || value.command === '/sessions search' || sessionViewCommandParse(value.command))
     || !(value.expectedSessionId === undefined || value.expectedSessionId === null
       || (typeof value.expectedSessionId === 'string' && value.expectedSessionId.length === 12 && HEX_ID.test(value.expectedSessionId)))
     || !(value.expectedModelRevision === undefined || value.expectedModelRevision === null

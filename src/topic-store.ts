@@ -5,11 +5,12 @@ import {join} from 'node:path';
 
 export interface TopicScope {ownerKey: string; chatKey: string}
 export interface TopicReceipt {threadId: string; messageId: string; link?: string}
-/** Keys come exclusively from verified events and confirmed bot receipts. No message text is stored. */
+/** Keys come exclusively from verified events and confirmed receipts; only the bounded topic title is retained. */
 export interface TopicBinding extends TopicScope, TopicReceipt {
   laneKey: string;
   conversationKey: string;
   sessionId?: string;
+  title?: string;
   groupAccessKey?: string;
 }
 
@@ -53,11 +54,13 @@ function parseBinding(value: unknown): TopicBinding {
     || typeof item.threadId !== 'string' || !THREAD.test(item.threadId)
     || typeof item.messageId !== 'string' || !MESSAGE.test(item.messageId)
     || (item.sessionId !== undefined && (typeof item.sessionId !== 'string' || !/^[a-f0-9]{12}$/.test(item.sessionId)))
+    || (item.title !== undefined && (typeof item.title !== 'string' || !item.title.trim() || Array.from(item.title).length > 80 || /[\u0000-\u001f\u007f-\u009f]/.test(item.title)))
     || (item.groupAccessKey !== undefined && (typeof item.groupAccessKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(item.groupAccessKey)))
     || (item.link !== undefined && topicLink(item.link) !== item.link)) throw new TopicStoreError('INVALID_INPUT');
   return {ownerKey: item.ownerKey, chatKey: item.chatKey, laneKey: item.laneKey, conversationKey: item.conversationKey,
     threadId: item.threadId, messageId: item.messageId,
     ...(item.sessionId === undefined ? {} : {sessionId: item.sessionId}),
+    ...(item.title === undefined ? {} : {title: item.title}),
     ...(item.groupAccessKey === undefined ? {} : {groupAccessKey: item.groupAccessKey}),
     ...(item.link === undefined ? {} : {link: item.link})};
 }
@@ -133,6 +136,7 @@ export class TopicStore {
         // A later event must not move the topic's stable anchor or discard its selected session/link.
         next.messageId = existing.messageId;
         next.sessionId ??= existing.sessionId;
+        next.title ??= existing.title;
         next.link ??= existing.link;
         if (JSON.stringify(existing) === JSON.stringify(next)) return {...existing};
       }

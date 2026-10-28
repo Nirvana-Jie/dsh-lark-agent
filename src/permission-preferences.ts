@@ -55,8 +55,8 @@ function parse(value: unknown): PermissionDocument {
 }
 
 /**
- * The permission preset a private chat chose in Feishu. It applies to that
- * chat's sessions only; the host's own default for other sessions is untouched.
+ * Permission snapshots for an exact conversation context, including legacy
+ * private-chat defaults. Joint model/permission snapshots take precedence.
  * One bot process owns this store under its state-directory lock.
  */
 export class PermissionPreferencesStore {

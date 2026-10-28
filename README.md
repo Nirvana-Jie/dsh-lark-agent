@@ -79,14 +79,14 @@ The connection's model check does not create a “飞书连接测试” conversa
 | Send a voice message | Use **开通语音权限** (authorize voice) for that robot, then pause, enable and save voice input. Transcribes up to 60 seconds of Chinese / English speech and replies in text; requires FFmpeg and a tenant plan that supports ASR |
 | Ask for something that needs your OK | Sends a confirmation card: tap **允许一次** (allow once) or **拒绝** (deny); no answer within 5 minutes means it won't run |
 | Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
-| Use `/permission`, or **设置 → 权限模式** (Settings → Permission mode) in the bottom menu | Switches between read-only, workspace edits and full access, like the app's permission selector; full access stops asking. The card you tap updates in place and turns green when done |
+| Tap **本话题设置** (Topic settings), or use `/settings` inside a topic | Edit that topic's model, thinking depth and permission mode; Save applies them from the next turn. The bottom settings menu lets you select a topic or edit defaults for new topics. Full access requires confirmation |
 | Ask for the result file | Sends files from its workspace straight to the chat |
 | Say "lead with the conclusion from now on" | Remembers the preference |
 | Continue inside a topic, or use `/sessions`, `/new` | Keeps each conversation in its own native Feishu topic; reply beneath a new topic's entry card, or use the searchable, paged dropdown to reopen an earlier topic |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |
 | Ask it to let you pick between options first | Sends a form card and continues once you submit |
 | Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2` / `rc.3`, opening that Feishu session in the app also shows a local preview |
-| Use `/model`, `/thinking` | Switches between the host's configured models and thinking depth, in sync with Harness on your computer (App `0.2.1-rc.2` / `rc.3`) |
+| Use `/model`, `/thinking` | Inside a topic, changes only that topic's model and thinking depth, in sync with the same App session; in the main chat, changes defaults for new topics |
 
 By default it answers only your own private chat. In that chat the assistant is your Harness itself: the tools it can use and the actions that need your confirmation follow the permission settings on your computer. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
 

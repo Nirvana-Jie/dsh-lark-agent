@@ -30,6 +30,20 @@ afterEach(async () => {
 });
 
 describe('signed card actions', () => {
+  it('signs exact settings navigation and draft capabilities and rejects arbitrary selections or scopes', async () => {
+    const actions = await CardActions.open(await temporary(), namespace);
+    for (const command of ['/settings', '/settings defaults', '/settings topics', '/settings topics 2', '/settings pick 0',
+      '/settings draft 123456abcdef 0 model', '/settings draft 123456abcdef 1 thinking', '/settings draft 123456abcdef 2 permission',
+      '/settings draft 123456abcdef 3 save', '/settings draft 123456abcdef 4 copy', '/settings draft 123456abcdef 5 cancel',
+      '/settings draft 123456abcdef 6 models 1']) {
+      expect(actions.verify(actions.issue({...sample, command}))?.command).toBe(command);
+    }
+    for (const command of ['/settingstopics', '/settings defaults other-user', '/settings pick om_other', '/settings draft invalid 0 save',
+      '/settings draft 123456abcdef -1 save', '/settings draft 123456abcdef 0 permission danger-full-access', '/settings draft 123456abcdef 0 unknown']) {
+      expect(() => actions.issue({...sample, command})).toThrow('Invalid card action binding');
+    }
+  });
+
   it('signs bounded session browsing and search actions without granting arbitrary commands', async () => {
     const actions = await CardActions.open(await temporary(), namespace);
     for (const command of ['/sessions search', '/sessions pick 1', `/sessions page 2 ${Buffer.from('项目规划').toString('base64url')}`]) {

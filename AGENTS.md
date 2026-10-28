@@ -28,7 +28,7 @@
 | 图片与语音输入 | `src/message.ts`、`src/media-input.ts`、`src/lark-cli.ts`、`src/bridge.ts`、`src/dsh-runtime.ts` | `media-input`、`lark-cli`、`bridge`、`presentation-flow`、`dsh-runtime`；真实宿主的图片入库与恢复 |
 | 身份、准入、队列、命令 | `src/message.ts`、`src/bridge.ts` | `message`、`bridge`、`rich-bridge` 测试 |
 | 双宿主模型、工具与原生恢复 | `src/dsh-runtime.ts` | `dsh-runtime`、`dsh-runtime-modern`、`persistence-flow` 测试 |
-| 模型选择、思考深度与旧卡片冲突 | `src/model-controls.ts`、`src/model-preferences.ts`、`src/bridge.ts` | `model-controls-bridge`、`model-preferences`、`dsh-runtime-model-native` 测试 |
+| 话题设置、模型选择与旧卡片冲突 | `src/settings-controls.ts`、`src/model-controls.ts`、`src/model-preferences.ts`、`src/bridge.ts` | `channel-bridge`、`model-controls-bridge`、`model-preferences`、`dsh-runtime-model-native` 测试 |
 | 飞书底部菜单、私聊定位 | `src/bot-menu.ts`、`src/direct-chats.ts`、`src/lark-cli.ts` | `bot-menu`、`direct-chats`、`model-controls-bridge`、`bot-service` 测试 |
 | 记忆可见性、群授权 | `src/memory-store.ts`、`src/bridge.ts` | `memory-store`、`memory-privacy` 测试 |
 | 会话目录、历史选择器、原生话题、去重、全局机器人租约 | `src/session-store.ts`、`src/session-controls.ts`、`src/topic-store.ts`、`src/topic-cards.ts`、`src/bridge.ts`、`src/ledger.ts`、`src/lock.ts`、`src/bot-service.ts` | `session-store`、`session-controls`、`topic-store`、`topic-cards`、`topic-bridge`、`state`、`index`、`onboarding` 测试 |
@@ -55,11 +55,11 @@
 - 自动接入仅授权本人私聊，`groupChats: []`，本人私聊为 Harness 模式（`directMode: 'harness'`）；团队配置默认仍是受限助手，群聊始终受限并使用 `allowedTools`。Secret 仅交给官方 CLI 凭据存储；连接快照、浏览器、日志和 `connection.json` 使用字段白名单。
 - Harness 模式只用于已验证本人的私聊（运行时对非私聊策略拒绝创建），飞书只是该 Harness 会话的入口：保留宿主人设、运行时上下文、工具、展示模式与权限策略，只追加 `lark-channel` 渠道段。宿主审批和提问由插件按 agent 作用域监听，转成签名卡片发给本人；卡片答复绕过会话队列（运行中的回合正占着它），按 ID 一次有效并校验操作者与聊天，超时、取消或卡片不可用一律拒绝。旧宿主的提问只有全局浏览器提供方，Harness 模式下隐藏 `ask_user_question`，由模型在回复里提问。会话按宿主的 agent 预设组成（新会话记录默认预设，恢复时用记录的或默认的），受限会话不加入预设。
 - Harness 子智能体回传唤起的主会话续跑也归原话题队列：在公开提示词组装接口等待准入、加载当前渠道上下文并安装交互监听，原生 checkpoint 后复用回复与交付流程。续跑绑定精确原生 Session 和服务端保存的原话题，以原生会话／回合标识去重；不重复提交用户输入、不转发其他 agent 的日志、不扩展到群聊。取消、容量拒绝和关闭须释放等待组装的宿主，保存结果不确定时停止访问。
-- 权限模式只在本人 Harness 私聊切换：经签名一次性卡片或本人命令，选项取自宿主公开的 `permissionPresets.catalog()`，经 `set()` 作用于当前会话；选择按私聊保存并在新开或恢复的会话上补齐，不修改宿主默认或其他会话。App 在当前会话上改的模式（与上次所见不同）记为私聊选择，卸载会话（`/new`、`/resume`、闲置回收、恢复）和关闭服务前也要先记下；私聊没有选择时，新会话用 `catalog().defaultPreset`（新建会话带 `seed: []`，宿主不会自动补默认），恢复的会话保留其记录。没有目录的旧宿主不提供该入口。
+- 权限模式只在本人 Harness 私聊切换，目录取自公开 `permissionPresets.catalog()`。话题内的选择只作用于该逻辑话题并与同一原生会话同步；恢复时保留原生记录，App 的修改不传播到兄弟话题或默认。新话题在创建入口时捕获权限默认，旧版私聊选择只作为新话题默认的迁移来源。旧宿主没有目录时不显示该选项。设置卡先编辑内存草稿，保存时重新校验目录、话题、会话和设置 revision，原生 checkpoint 后将模型与权限作为同一快照持久化；过期卡片只刷新，结果不确定时停止访问。
 - 双宿主通过公开能力适配。保留 legacy persona/readFrom 与 modern prefix/snapshotEvents/open-read 的分支；现代 required cwd 取自当前 Agent。更新 peer 范围前，在对应真实宿主依赖上验证，不能只改版本字符串或跳过安全能力。
 - 自动接入状态按宿主代际及 home 分目录；原生持久化跟随宿主。跨代迁移需明确验证，不复用旧后台状态或混写原生日志。
 - 项目、仓库与 npm 包名为 `dsh-lark-agent`；插件 ID 与日志前缀 `im-larkbot`、数据目录 `~/.dsh-larkbot/`、RPC 路径 `larkbot`、设置页与样式 ID、应用注册来源、launchd 标签和构建环境变量沿用旧名。改这些运行标识会让已有安装丢失配置、状态或后台服务，或破坏设置页与宿主的契约，须先设计并验证迁移。
-- 模型目录与思考档位来自宿主公开接口。App 宿主（有 `sessionProjections` 的 `modelSelection` 记录和 `agentDefaultModel.saveSelection`）上的本人 Harness 私聊与 App 共用：会话按 App 规则取模型（会话记录的选择 → 上次请求的模型 → 宿主默认），飞书切换追加 `model/selection` 并 checkpoint 后，再像 App 选择器一样保存为宿主默认（checkpoint 失败即关闭会话，下一轮前重新打开；没有会话时选择只存在宿主默认里，保存失败须报错）；按钮 revision 要在同步共享会话的记录之后、以及重新打开会话之后校验，过期卡片只刷新不执行；新会话不带私聊副本，私聊里只保留镜像供按钮绑定 revision。旧宿主、受限模式和管理员固定路由仍按用户／聊天／话题保存，首次捕获完整默认值，不修改宿主全局默认。切换时保留原生会话。按钮绑定设置 revision，执行前重新校验可用选项；保存结果不确定时停止推理。
+- 模型目录与思考档位来自宿主公开接口。App 宿主的本人 Harness 私聊与 App 中同一原生会话共用模型记录；话题内修改追加 `model/selection` 并 checkpoint，仅修改该话题。只有明确修改「新话题默认」（含主聊天 `/model` / `/thinking`）才调用 `agentDefaultModel.saveSelection`；失败报错。新话题创建入口时捕获默认，首次创建原生会话时记录这份选择；已保存的会话以自己的原生记录为准。按钮 revision 在同步共享记录和重新打开会话之后校验。旧宿主、受限模式和管理员固定路由按原用户／聊天／话题保存，不改宿主全局默认。保存结果不确定时停止推理。
 - 目录展示可以短时缓存和合并并发读取；实际切换仍实时校验。加载卡只更新已确认创建的消息，创建或更新结果未知时不另发 fallback、不重跑命令。本人私聊里点设置或话题卡片时只更新被点的卡片（处理中、结果、过期刷新），不另发卡片；群聊卡片仍另发回复，继续经过记忆授权检查。
 - 菜单事件没有消息 ID 或聊天 ID。仅接受固定 event key，以结构化 operator 身份查找已验证的私聊，再向该 open ID 发送；不能伪造 reply message ID。配对私聊映射在服务取得两把锁后写入。菜单订阅与菜单定义分别配置，发布后预检成功才启用接收。
 
@@ -71,7 +71,7 @@
 - 先持久化消息 claim 再执行；原生 checkpoint 成功后才发布会话目录或确认回复。保存结果不确定时拒绝继续访问，不能用空状态掩盖失败。
 - 每个用户／聊天／话题串行，取消只影响所属队列。修改型卡片 nonce 在容量准入后消费；回调继续校验签名、操作者、聊天和当前权限。
 - 私聊与群聊的新会话均绑定飞书原生话题；只使用真实事件的 `thread_id` 或已确认的机器人回复回执，不从引用/root ID 猜测。主聊天新问题先创建并持久化绑定，再推理，首轮与立即到达的话题消息共用队列。菜单、新话题和旧会话入口可新建根消息；创建结果未知不重发、不转到主聊天推理。菜单和 `/new` 使用卡片作为独立话题根消息，不另发独立确认卡，可复用的历史选择卡不改绑成新话题；收到问题才创建原生会话；`/resume` 定位话题，旧记录用原 context 与显式 sessionId 绑定，不修改兄弟会话的 activeId。话题目录按所有者与聊天授权，群聊仍需 @、保持受限模式，授权 epoch 变化后旧话题不得续聊。话题绑定在原生 checkpoint 与目录保存成功后补记 sessionId，持久化结果未知时停止访问。
-- 话题入口控制不恢复主聊天的旧 active 会话；空的命令队列完成后及时回收，不能占住新话题的最后一个容量名额。非共享模型在新建话题时捕获当前话题或主聊天的选择，不回溯修改已有话题；App 共享模型仍用宿主默认。Harness 权限选择继续按本人私聊保存，开话题前记下 App 对存活会话的修改，已有话题下一轮补齐私聊选择。
+- 话题入口控制不恢复主聊天的旧 active 会话；空的命令队列完成后及时回收。本人 Harness 私聊的新话题创建入口时捕获新话题默认，已有话题独立保存；群聊和受限助手保持原继承规则。设置绑定服务端保存的逻辑话题，原生会话 fork 后继续沿用原话题设置。菜单没有话题信息，设置先选择默认或获准的话题；运行中拒绝修改且不消耗卡片 nonce，后台续跑仍归原话题队列。
 - 受限模式（群聊、团队配置的默认私聊）保留独立 complete persona、动态上下文抑制、native tools、`restrict` 与单向 `guard`，以及宿主审批拒绝；不能把 Harness 模式、思考过程、实时卡片或确认卡片扩展到群聊。工作目录不是文件系统沙箱；额外工具必须自身实施资源权限。
 - CLI 使用固定 profile、bot 身份、参数数组和 stdin；正文及凭据不进入 shell 插值。发送结果未知时不自动重发或另发文字 fallback。实时卡片只有首次回复算发送：卡片实体创建失败才改用普通回复（之后 10 分钟不再尝试）；回复结果未知时继续更新卡片、不另发消息。对同一卡片实体的更新幂等，可用更高的 sequence 重试。一次回复只用一张卡片：思考过程与工具步骤默认折叠、按 App 的步骤名逐行显示，终稿优先放回答，过程用全部剩余空间，超出卡片上限时从最早的步骤省略并注明，不另发消息；工具详情和面板标题只用纯文本或转义后的内容。
 - Harness 交付的文件只在 realpath 位于该用户工作区内、是非空普通文件且不超过 30 MB 时上传，CLI 只收到以文件所在目录为 cwd 的 `./basename`；其余只告知电脑上的位置，上传结果未知时不重发。

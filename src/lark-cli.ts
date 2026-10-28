@@ -408,6 +408,8 @@ export class LarkCli {
       || (options.chatType !== undefined && options.chatType !== 'p2p' && options.chatType !== 'group')
       || (options.textOnly !== undefined && typeof options.textOnly !== 'boolean')) throw new Error('Invalid Lark topic target.');
     const text = `话题：${title}\n请在这个话题里继续。${options.chatType === 'group' ? '群聊中每条消息仍需 @机器人。' : ''}`;
+    const entry = options.textOnly ? {msg_type: 'text', content: JSON.stringify({text})}
+      : {msg_type: 'interactive', content: this.feedbackContent(renderPanel(topicEntryPanel(title, options.chatType ?? 'p2p')))};
     const request = async (path: string, data: Record<string, unknown>, params?: string) => {
       const result = await this.executeJson(['api', 'POST', path, ...(params ? ['--params', params] : []),
         '--data', '-', '--as', 'bot', '--format', 'json'], JSON.stringify(data), 'reply', this.commandTimeoutMs);
@@ -418,22 +420,25 @@ export class LarkCli {
       return receipt;
     };
     let anchor = target.messageId;
+    let entryMessageId: string | undefined;
     let receipt: Record<string, unknown> | undefined;
     if (!anchor) {
       // Menu events and replies inside another topic cannot be used as a new root.
       // Confirm the root before replying; never invent a message ID or retry an unknown send.
-      const content = options.textOnly ? JSON.stringify({text}) : this.feedbackContent(renderPanel(topicEntryPanel(title, options.chatType ?? 'p2p')));
-      receipt = await request('/open-apis/im/v1/messages', {receive_id: target.chatId, msg_type: options.textOnly ? 'text' : 'interactive',
-        content, uuid: `${options.idempotencyKey}:root`}, '{"receive_id_type":"chat_id"}');
+      receipt = await request('/open-apis/im/v1/messages', {receive_id: target.chatId, ...entry,
+        uuid: `${options.idempotencyKey}:root`}, '{"receive_id_type":"chat_id"}');
       anchor = receipt.message_id as string;
+      entryMessageId = anchor;
     }
     if (!receipt?.thread_id) receipt = await request(`/open-apis/im/v1/messages/${anchor}/reply`,
-      {msg_type: 'text', content: JSON.stringify({text: target.messageId ? text : `在这里发送消息继续。${options.chatType === 'group' ? '每条消息仍需 @机器人。' : ''}`}),
+      {...(target.messageId ? entry : {msg_type: 'text', content: JSON.stringify({text: `在这里发送消息继续。${options.chatType === 'group' ? '每条消息仍需 @机器人。' : ''}`})}),
         reply_in_thread: true, uuid: `${options.idempotencyKey}:open`});
     if (typeof receipt.thread_id !== 'string' || !/^(?:om|omt)_[A-Za-z0-9_-]{1,256}$/.test(receipt.thread_id)) {
       throw new Error('Lark topic creation did not return a thread ID; delivery is unknown.');
     }
-    const messageId = receipt.message_id as string;
+    // Updates must target our entry card, never the text reply that only opens
+    // a menu-created root's thread. For user roots, the first bot reply is the card.
+    const messageId = entryMessageId ?? receipt.message_id as string;
     const link = await this.topicLink(messageId);
     return {threadId: receipt.thread_id, messageId, ...(link ? {link} : {})};
   }

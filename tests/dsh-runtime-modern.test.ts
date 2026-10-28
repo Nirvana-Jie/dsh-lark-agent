@@ -202,6 +202,7 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
       expect(session.modelSelection()).toEqual({provider: 'offline', model: 'offline'});
       const agent = host.root.get('agents').get(session.id);
       session.setModelSelection({provider: 'offline', model: 'offline', reasoningEffort: 'high'});
+      expect(saved).toEqual([]); // A session record and the new-session default have separate write paths.
       expect(picks(agent)).toEqual([{provider: 'offline', model: 'offline', reasoningEffort: 'high'}]);
       expect(session.modelSelection()).toEqual({provider: 'offline', model: 'offline', reasoningEffort: 'high'});
       // A pick made in the App on this session is recorded the same way and routes the next request.
@@ -218,6 +219,42 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
       const restarted = await appHost();
       const resumed = await restarted.host.adapter.resume(policy, session.id);
       expect(resumed.modelSelection()).toEqual({provider: 'offline', model: 'app-pick'});
+      await resumed.dispose();
+    } finally {
+      for (const host of hosts) await host.close().catch(() => undefined);
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('reads the real permission default without a session and preserves a recorded session choice after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-modern-permissions-'));
+    const hosts: Array<Awaited<ReturnType<typeof createHost>>> = [];
+    const open = async () => {
+      const host = await createHost(directory); hosts.push(host);
+      await host.mount({name: 'offline-permission-dependencies', apply(ctx: {provide(name: string, value: unknown): void}) {
+        ctx.provide('shell', {sandboxMode: 'workspace-write'});
+        ctx.provide('approval', {config: {policy: 'ask'}});
+      }});
+      const permissions = await hostModule('dsh-permission-presets');
+      await host.mount(permissions.default ?? permissions.PermissionPresetService, {defaultPreset: 'workspace-write', presets: {
+        'workspace-write': {sandbox: 'workspace-write', approval: 'ask', name: 'Workspace'},
+        'read-only': {sandbox: 'read-only', approval: 'ask', name: 'Read only'},
+      }});
+      return host;
+    };
+    const policy = {cwd: '/tmp/lark-modern-owner', allowedTools: [], provider: 'offline', model: 'offline', mode: 'harness' as const, memory: ownerMemory()};
+    try {
+      const host = await open();
+      expect(host.adapter.permissionDefault()).toBe('workspace-write');
+      expect(host.root.get('agents').list()).toEqual([]);
+      const session = await host.adapter.create(policy);
+      session.setPermission('read-only');
+      await session.checkpoint(); await session.dispose(); await host.close();
+      const restored = await open();
+      expect(restored.adapter.permissionDefault()).toBe('workspace-write');
+      const resumed = await restored.adapter.resume(policy, session.id);
+      expect(resumed.permissionState()).toMatchObject({current: 'read-only', defaultPreset: 'workspace-write'});
+      expect(restored.requests).toHaveLength(0);
       await resumed.dispose();
     } finally {
       for (const host of hosts) await host.close().catch(() => undefined);

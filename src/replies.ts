@@ -29,7 +29,8 @@ export interface ReplyPanel {
   actions?: ReplyAction[];
   actionColumns?: 1 | 2 | 3;
   /** Trusted catalog controls; option values and callbacks are supplied by the application. */
-  select?: {placeholder: string; options: {label: string; value: string}[]; value: Record<string, string>; initialOption?: string; disabled?: boolean};
+  select?: {name?: string; placeholder: string; options: {label: string; value: string}[]; value: Record<string, string>; initialOption?: string; disabled?: boolean};
+  selects?: (NonNullable<ReplyPanel['select']> & {name: string; label: string})[];
   search?: {query: string; value: Record<string, string>; disabled?: boolean};
   note?: string;
 }
@@ -200,6 +201,14 @@ const TONES: Record<PanelTone, {header: string; background: string; icon: string
   muted: {header: 'grey', background: 'grey-50', icon: 'time_outlined', color: 'grey'},
 };
 
+/** Only trusted application code supplies callback capabilities. */
+export function replyActionButton(action: ReplyAction, maxLabel = 24): Record<string, unknown> {
+  return {tag: 'button', text: title(plainLabel(action.label, maxLabel)), type: action.primary ? 'primary' : 'default', width: 'fill', margin: '0px',
+    ...(action.disabled ? {disabled: true} : {behaviors: [{type: 'callback', value: {...action.value}}]}),
+    ...(action.confirm && !action.disabled ? {icon: {tag: 'standard_icon', token: 'warning_outlined'},
+      confirm: {title: title(plainLabel(action.confirm.title, 80)), text: title(plainLabel(action.confirm.text, 300))}} : {})};
+}
+
 /** Trusted application panels only. Model strings never choose components or callback values. */
 export function renderPanel(panel: ReplyPanel): ReplyPayload {
   const metrics = (panel.metrics ?? []).filter(metric => metric.label.trim() || metric.value.trim());
@@ -233,12 +242,14 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
         action_type: 'form_submit', form_action_type: 'submit', form_name: 'dsh_sessions_search_form',
         disabled: Boolean(panel.search.disabled), behaviors: [{type: 'callback', value: {...panel.search.value}}]},
     ], {width: 'auto'})]}]});
-  if (panel.select) elements.push({tag: 'select_static', name: 'dsh_session_picker', width: 'fill',
-    placeholder: title(panel.select.placeholder), disabled: Boolean(panel.select.disabled),
-    ...(panel.select.initialOption ? {initial_option: panel.select.initialOption} : {}),
-    options: panel.select.options.map(option => ({text: title(safePlainText(option.label)), value: option.value})),
-    behaviors: [{type: 'callback', value: {...panel.select.value}}],
-  });
+  for (const select of [...(panel.select ? [panel.select] : []), ...panel.selects ?? []]) {
+    if ('label' in select) elements.push(muted(String(select.label)));
+    elements.push({tag: 'select_static', name: select.name ?? 'dsh_session_picker', width: 'fill',
+      placeholder: title(select.placeholder), disabled: Boolean(select.disabled),
+      ...(select.initialOption && select.options.some(option => option.value === select.initialOption) ? {initial_option: select.initialOption} : {}),
+      options: select.options.map(option => ({text: title(safePlainText(option.label)), value: option.value})),
+      behaviors: [{type: 'callback', value: {...select.value}}]});
+  }
   for (const section of panel.sections) {
     if (!section.text.trim() && !section.title?.trim()) continue;
     if (section.collapsible && section.text.trim()) {
@@ -267,13 +278,7 @@ export function renderPanel(panel: ReplyPanel): ReplyPayload {
   const actionColumns = panel.actionColumns ?? 3;
   for (let start = 0; start < actions.length; start += actionColumns) {
     elements.push({tag: 'column_set', flex_mode: panel.actionColumns ? 'none' : 'flow', horizontal_spacing: '8px', margin: '0px', columns: actions.slice(start, start + actionColumns).map(action => column([
-      {tag: 'button', text: title(plainLabel(action.label, panel.actionColumns === 1 ? 64 : 24)), type: action.primary ? 'primary' : 'default', width: 'fill', margin: '0px',
-        ...(action.disabled ? {disabled: true} : {behaviors: [{type: 'callback', value: {...action.value}}]}),
-        ...(action.confirm && !action.disabled ? {
-          icon: {tag: 'standard_icon', token: 'warning_outlined'},
-          confirm: {title: title(plainLabel(action.confirm.title, 80)), text: title(plainLabel(action.confirm.text, 300))},
-        } : {}),
-      },
+      replyActionButton(action, panel.actionColumns === 1 ? 64 : 24),
     ], {vertical_spacing: '0px'}))});
   }
   if (panel.note?.trim()) elements.push(muted(panel.note));
