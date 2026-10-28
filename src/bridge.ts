@@ -1010,7 +1010,9 @@ export class BotBridge {
           // A normal App topic only needs the effective default, not every provider's menu catalog.
           const source = this.sharedModel(message, {user}) ? undefined
             : await this.modelState(defaults, {user, tail: Promise.resolve(), pending: 0, lastUsed: Date.now(), generation: 0}, true);
-          const selection = await this.runtime.resolveModelSelection!(source?.selection);
+          // modelState already captures configured routes, including valid
+          // administrator models that a provider omits from its menu catalog.
+          const selection = source?.selection ?? await this.runtime.resolveModelSelection!();
           const permissionPreset = await this.defaultPermission(message);
           if (!await this.state.modelPreferences!.get(targetContext)) {
             await this.state.modelPreferences!.set(targetContext, selection,

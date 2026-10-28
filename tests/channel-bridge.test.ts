@@ -253,6 +253,35 @@ describe('topic settings drafts and defaults', () => {
     expect(h.sentText()).toContain(new DshRuntimeError('INVALID_MODEL_SELECTION').message);
   });
 
+  it.each(['task A', '/new'])('preserves an unlisted administrator route when %s opens a topic', async text => {
+    const h = await setup(options);
+    const configured = {provider: 'p', model: 'administrator-model'};
+    h.config.provider = configured.provider; h.config.model = configured.model;
+    h.hostRecord.reasoningEffort = 'high';
+    const catalog = await h.runtime.catalog!();
+    const resolve = vi.fn(async (selection?: ModelSelection) => {
+      const requested = selection ?? catalog.defaultSelection;
+      if (!requested || !catalog.models.some(model => model.provider === requested.provider && model.model === requested.model)) {
+        throw new DshRuntimeError('INVALID_MODEL_SELECTION');
+      }
+      return {...requested};
+    });
+    h.runtime.resolveModelSelection = resolve;
+    await h.bridge.accept(event(text));
+    expect(h.transport.openTopic).toHaveBeenCalledTimes(1);
+    expect(await h.modelPreferences!.get(await topicContext(h))).toMatchObject({selection: configured});
+    expect(resolve).not.toHaveBeenCalled();
+    if (text === '/new') {
+      expect(h.runtime.create).not.toHaveBeenCalled();
+      await h.bridge.accept(event('first question', {thread_id: 'omt_topic_1'}));
+    }
+    expect(h.runtime.create).toHaveBeenCalledTimes(1);
+    expect(h.policies[0]).toMatchObject(configured);
+    expect(h.policies[0]!.reasoningEffort).toBeUndefined();
+    expect(h.handles[0]!.modelSelection!()).toEqual(configured);
+    expect(h.run).toHaveBeenCalledTimes(1);
+  });
+
   function ownerKeyFor(h: Harness) {return ownerKey({senderId: 'ou_alice', chatId: 'oc_alice', chatType: 'p2p', threadId: '', messageId: 'om_test', text: ''}, h.config);}
   async function topicContext(h: Harness) {
     const scope = {ownerKey: ownerKeyFor(h), chatKey: createHash('sha256').update(JSON.stringify([h.config.profile, h.config.botOpenId, 'p2p', 'oc_alice'])).digest('hex')};
