@@ -35,7 +35,7 @@ In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.5.1 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.0 --allow-build=protobufjs
 ```
 
 Then restart `dsh web`.
