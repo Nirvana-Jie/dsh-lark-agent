@@ -16,7 +16,7 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 
 开始前：
 
-- DeepSeek Harness 正在运行、能正常对话并已选好默认模型：PC App `0.2.1-rc.3`（`0.2.1-rc.2` 同样可用），或 Web / `dsh` CLI `0.1.1-rc.2`。
+- DeepSeek Harness 正在运行、能正常对话并已选好默认模型：PC App `0.2.1-rc.5`（`0.2.1-rc.2`、`rc.3` 同样可用），或 Web / `dsh` CLI `0.1.1-rc.2`。
 - 在同一台机器上**先**装好官方 Lark CLI，再启用插件（需要 Node.js / npm）：
 
   ```sh
@@ -35,7 +35,7 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) 会调用 pnpm，需先装好 pnpm 并确保它在 PATH 中：
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.6.0 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.1 --allow-build=protobufjs
 ```
 
 然后重启 `dsh web`。
@@ -53,8 +53,10 @@ dsh plugin --profile web add dsh-lark-agent@0.6.0 --allow-build=protobufjs
 
 新版本发布满一天后，飞书设置页顶部会提示并给出下面的步骤（桌面版还能一键打开插件列表）。在此之前，未指定精确版本的安装和更新（包括 `@latest`）仍会选择之前的版本：pnpm 11 默认跳过发布不满 24 小时的版本。刚发布时可用上方安装示例中的精确版本安装本次版本。若安装时装上旧版并提示与当前 DeepSeek Harness 不兼容，见[排障](DEVELOPMENT.md#排障)。
 
+App `0.2.1-rc.5` 需要插件 `0.6.1` 的兼容更新；插件 `0.6.0` 只声明支持到 rc.3。兼容版本发布后安装该版本，或使用[从源码构建的安装包](DEVELOPMENT.md#开发与测试)。
+
 1. 在飞书设置页点「暂停连接」，按[升级](DEVELOPMENT.md#升级)备份。
-2. 桌面版：在插件页卸载 `dsh-lark-agent` 后重新添加（弹窗提示第三方插件需先卸载再安装新版；App 内升级尚未实机验证；更早从源码安装的版本显示为 `dsh-larkbot`）。CLI：运行 `dsh plugin --profile web update dsh-lark-agent@latest`，再重启 `dsh web`。
+2. 桌面版：在插件页卸载 `dsh-lark-agent` 后重新添加（弹窗提示第三方插件需先卸载再安装新版；rc.5 已验证本地构建包升级；更早从源码安装的版本显示为 `dsh-larkbot`）。CLI：运行 `dsh plugin --profile web update dsh-lark-agent@latest`，再重启 `dsh web`。
 3. 点「恢复连接」，确认机器人能回复。
 
 ## 连接飞书
@@ -83,7 +85,7 @@ dsh plugin --profile web add dsh-lark-agent@0.6.0 --allow-build=protobufjs
 | 在话题里继续，或用 `/sessions`、`/new` | 每段对话独立保存为飞书原生话题；新话题直接在入口卡片下方回复，通过下拉、搜索和翻页找回旧话题 |
 | 「用柱状图比较这些数据」 | 回一张飞书原生图表卡片 |
 | 「先给我几个方案选一下」 | 发表单卡片，提交后接着聊 |
-| 「把方案画成架构图」「整理成报告」 | 生成只授权你阅读的飞书文档（架构图附画板）；在 App `0.2.1-rc.2` / `rc.3` 中打开这段飞书会话还能本地预览 |
+| 「把方案画成架构图」「整理成报告」 | 生成只授权你阅读的飞书文档（架构图附画板）；在 App `0.2.1-rc.2` / `rc.3` / `rc.5` 中打开这段飞书会话还能本地预览 |
 | `/model`、`/thinking` | 话题内仅切换该话题的模型和思考深度，与 App 中的同一会话同步；主聊天中的命令修改新话题默认 |
 
 默认只回应你本人的私聊。私聊里的助手就是电脑上的 Harness：能用哪些工具、哪些操作要确认，都由电脑上的权限设置决定。会话和记忆存在运行 Harness 的电脑上，消息经过飞书和模型服务商。
@@ -93,7 +95,7 @@ dsh plugin --profile web add dsh-lark-agent@0.6.0 --allow-build=protobufjs
 ## 须知
 
 - **更多文档**：命令、隐私、升级、底部菜单、团队部署与排障见[使用与开发文档](DEVELOPMENT.md)。
-- **兼容性**：已在 PC App `0.2.1-rc.2` 与 `dsh` CLI / Web `0.1.1-rc.2` 上完整验证；PC App `0.2.1-rc.3` 通过了真实宿主的接口测试，插件可正常加载和连接（rc.3 上的扫码新建连接尚未实测）。其他版本、平台和企业租户尚未逐一验证。
+- **兼容性**：已在 PC App `0.2.1-rc.2` 与 `dsh` CLI / Web `0.1.1-rc.2` 上完整验证；PC App `0.2.1-rc.3` 通过了真实宿主的接口测试，插件可正常加载和连接（rc.3 上的扫码新建连接尚未实测）。PC App `0.2.1-rc.5` 已验证真实宿主接口、本地包升级、插件加载、原连接恢复、暂停恢复和宿主重启；rc.5 上的首次扫码与真实本人私聊回复尚未实测。其他版本、平台和企业租户尚未逐一验证。
 
 ## 许可证
 
