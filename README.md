@@ -16,7 +16,7 @@ dsh-lark-agent adds a Feishu / Lark private chat to a running DeepSeek Harness: 
 
 Before you start:
 
-- DeepSeek Harness is running, can chat, and has a default model selected: PC App `0.2.1-rc.3` (`0.2.1-rc.2` also works), or Web / `dsh` CLI `0.1.1-rc.2`.
+- DeepSeek Harness is running, can chat, and has a default model selected: PC App `0.2.1-rc.5` (`0.2.1-rc.2` and `rc.3` also work), or Web / `dsh` CLI `0.1.1-rc.2`.
 - The official Lark CLI is installed on the same machine **before** you enable the plugin (needs Node.js / npm):
 
   ```sh
@@ -35,7 +35,7 @@ In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.6.0 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.1 --allow-build=protobufjs
 ```
 
 Then restart `dsh web`.
@@ -53,8 +53,10 @@ Then restart `dsh web`.
 
 When a new version has been out for a day, the Feishu settings page shows a notice with these steps (in the desktop app it also opens the plugin list for you). Until then, installs without an exact version, including `@latest`, still select the previous version because pnpm 11 skips releases less than 24 hours old. Use the exact version in the installation example above to install this release immediately after publication. If an install picks an older version that your DeepSeek Harness rejects as incompatible, see [Troubleshooting](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#排障).
 
+App `0.2.1-rc.5` needs the compatibility update in plugin `0.6.1`; plugin `0.6.0` only declares support through rc.3. Install the compatible version after publication, or use a [source-built package](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#开发与测试).
+
 1. On the Feishu settings page, click **暂停连接** (pause) and back up as described in [Upgrade](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级).
-2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (this in-app upgrade hasn't been tested end to end yet; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.
+2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (upgrading with a local build was verified on rc.5; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.
 3. Click **恢复连接** (resume) and check that the bot replies.
 
 ## Connect Feishu
@@ -85,7 +87,7 @@ The connection's model check does not create a “飞书连接测试” conversa
 | Continue inside a topic, or use `/sessions`, `/new` | Keeps each conversation in its own native Feishu topic; reply beneath a new topic's entry card, or use the searchable, paged dropdown to reopen an earlier topic |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |
 | Ask it to let you pick between options first | Sends a form card and continues once you submit |
-| Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2` / `rc.3`, opening that Feishu session in the app also shows a local preview |
+| Ask for an architecture diagram or a report | Creates a Feishu doc (with a whiteboard for diagrams) shared read-only with you alone; in App `0.2.1-rc.2` / `rc.3` / `rc.5`, opening that Feishu session in the app also shows a local preview |
 | Use `/model`, `/thinking` | Inside a topic, changes only that topic's model and thinking depth, in sync with the same App session; in the main chat, changes defaults for new topics |
 
 By default it answers only your own private chat. In that chat the assistant is your Harness itself: the tools it can use and the actions that need your confirmation follow the permission settings on your computer. Sessions and memory stay on the computer running Harness; messages pass through Feishu and your model provider.
@@ -95,7 +97,7 @@ A new request in the main chat opens a topic; continue inside that topic to keep
 ## Good to know
 
 - **More docs**: commands, privacy, upgrades, the chat bottom menu, team deployment and troubleshooting are in [DEVELOPMENT.md](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md) (Chinese).
-- **Compatibility**: fully verified with PC App `0.2.1-rc.2` and `dsh` CLI / Web `0.1.1-rc.2`. PC App `0.2.1-rc.3` passes the real-host contract tests, and the plugin loads and connects on it (first-time QR setup on rc.3 is not tested yet). Other versions, platforms and tenants are not yet verified.
+- **Compatibility**: fully verified with PC App `0.2.1-rc.2` and `dsh` CLI / Web `0.1.1-rc.2`. PC App `0.2.1-rc.3` passes the real-host contract tests, and the plugin loads and connects on it (first-time QR setup on rc.3 is not tested yet). On PC App `0.2.1-rc.5`, real-host contract tests, a local-package upgrade, plugin loading, restoring and pausing/resuming the existing connection, and host restart are verified; first-time QR setup and real private-chat replies on rc.5 are not tested yet. Other versions, platforms and tenants are not yet verified.
 - **Language**: the settings page, the bot's built-in messages (`/help`, status text, card buttons, bottom menu) and the intro video are in Chinese.
 
 ## License

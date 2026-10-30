@@ -41,7 +41,7 @@
 
 表中简写测试名对应 `tests/<名称>.test.ts` 或 `.test.tsx`；onboarding 行的省略路径均在 `src/onboarding/`。修改接入、打包或运行脚本时，同步中英文 README / DEVELOPMENT.md 中的可复制步骤；修改用户可见行为时，同步中英文 README、DEVELOPMENT.md、基础帮助和模型表达。
 
-宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` / `rc.3` 的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
+宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` / `rc.3` / `rc.5` 的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
 
 ## 接入与宿主契约
 
