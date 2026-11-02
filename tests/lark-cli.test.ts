@@ -981,6 +981,33 @@ describe('LarkCli live cards and files', () => {
     await expect(result).resolves.toBeUndefined();
   });
 
+  it('uploads an inline image with a fixed bot profile and returns its confirmed key without sending a message', async () => {
+    const result = new LarkCli({profile: 'team-bot'}).uploadImage('/work/space/$(literal) chart.png');
+    expect(args()).toEqual(['--profile', 'team-bot', 'im', 'images', 'create', '--data', '-', '--file=./$(literal) chart.png', '--as', 'bot', '--format', 'json']);
+    expect(body()).toEqual({image_type: 'message'});
+    expect(vi.mocked(spawn).mock.calls[0]?.[2]).toMatchObject({cwd: '/work/space', shell: false});
+    child.stdout.write('{"ok":true,"identity":"bot","data":{"image_key":"img_v3_fixture"}}'); child.close();
+    await expect(result).resolves.toBe('img_v3_fixture');
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {ok: true, identity: 'user', data: {image_key: 'img_v3_fixture'}},
+    {ok: true, identity: 'bot', dry_run: true, data: {image_key: 'img_v3_fixture'}},
+    {ok: true, identity: 'bot', data: {}},
+    {ok: true, identity: 'bot', data: {image_key: 'img_x)\n![bad](other'}},
+    {ok: false},
+  ])('rejects unconfirmed image uploads without retries: %j', async envelope => {
+    const result = new LarkCli({profile: 'team-bot'}).uploadImage('/work/space/chart.png');
+    child.stdout.write(JSON.stringify(envelope)); child.close();
+    await expect(result).rejects.toThrow(); expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['relative/file.png', '/work/space/', '/work/space/bad\nname', '/work/space/..'])('rejects unsafe image paths before spawning: %j', async path => {
+    await expect(new LarkCli({profile: 'team-bot'}).uploadImage(path)).rejects.toThrow('Invalid Lark image upload');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it.each(['relative/file.pdf', '/work/space/', '/work/space/bad\nname', '/work/space/..'])('rejects unsafe file paths before spawning: %j', async path => {
     await expect(new LarkCli({profile: 'team-bot'}).replyFile('om_prompt', path, {idempotencyKey: 'file-1', inThread: false, image: false}))
       .rejects.toThrow('Invalid Lark file reply');

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { realpath, stat } from 'node:fs/promises';
-import { basename, isAbsolute, relative, sep } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { basename } from 'node:path';
 import type { BotConfig, UserPolicy } from './config.js';
 import type { AgentPolicy, RuntimeSession, RuntimeContinuation, ModelSelection, ModelCatalog, ApprovalPrompt, QuestionAnswer, TurnObserver, TurnStreamEvent, UserQuestion, PermissionOption } from './dsh-runtime.js';
 import { DshRuntimeError } from './dsh-runtime.js';
@@ -27,6 +27,7 @@ import {sessionControlPanel, sessionPage, sessionQuery, sessionViewCommandParse,
 import {MediaInputError, prepareMedia, type MediaTransport} from './media-input.js';
 import {SettingsDrafts, settingsPanel, type SettingsDraft} from './settings-controls.js';
 import {topicEntryPanel} from './topic-cards.js';
+import {prepareReplyImages, uploadable} from './outgoing-files.js';
 
 export interface Runtime {
   create(policy: AgentPolicy): Promise<RuntimeSession>;
@@ -64,6 +65,7 @@ export interface Transport extends MediaTransport {
   streamCardText?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   updateCardEntity?(cardId: string, card: Record<string, unknown>, sequence: number): Promise<void>;
   replyFile?(messageId: string, path: string, options: {idempotencyKey: string; inThread: boolean; image: boolean}): Promise<void>;
+  uploadImage?(path: string): Promise<string>;
   openTopic?(target: {chatId: string; messageId?: string}, title: string,
     options: {idempotencyKey: string; chatType?: 'p2p' | 'group'; textOnly?: boolean}): Promise<TopicReceipt>;
   topicLink?(messageId: string): Promise<string | undefined>;
@@ -107,8 +109,6 @@ const QUESTION_TIMEOUT_MS = 10 * 60_000;
 // After a live card cannot be created (for example, before the CardKit scope is
 // granted), use ordinary replies for a while instead of failing every turn.
 const LIVE_RETRY_MS = 10 * 60_000;
-const MAX_FILE_BYTES = 30 * 1024 * 1024;
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_TEXT = '本次处理超时，已请求取消。请缩小问题范围后重试。';
 const STOPPING_TEXT = '连接正在关闭，本次处理已停止。';
 // Clicks on these panels update the clicked card itself; anything else answers with a new message.
@@ -128,20 +128,6 @@ function commandError(error: unknown): string {
     ? error.message : '操作未完成，请稍后重试；尚未确认保存成功。';
 }
 
-/** Only a regular file inside the user's own workspace is uploaded; anything else is just named. */
-async function uploadable(workspace: string, path: string): Promise<{path: string; image: boolean} | {reason: string}> {
-  let real: string;
-  try { real = await realpath(path); } catch { return {reason: '找不到这个文件'}; }
-  const inside = relative(workspace, real);
-  if (!inside || inside === '..' || inside.startsWith('..' + sep) || isAbsolute(inside)) return {reason: '不在这个私聊的工作区内，没有上传'};
-  let info;
-  try { info = await stat(real); } catch { return {reason: '无法读取'}; }
-  if (!info.isFile()) return {reason: '不是普通文件'};
-  if (info.size === 0) return {reason: '是空文件'};
-  if (info.size > MAX_FILE_BYTES) return {reason: '超过飞书 30 MB 的文件上限'};
-  if (/[\u0000-\u001f\u007f]/.test(basename(real))) return {reason: '文件名含有无法发送的字符'};
-  return {path: real, image: /\.(?:png|jpe?g|gif|webp)$/i.test(real) && info.size <= MAX_IMAGE_BYTES};
-}
 export type Audit = (event: {stage: string; messageId?: string; userId?: string; sessionKey?: string; elapsedMs?: number}) => void;
 interface Lane {
   user: UserPolicy;
@@ -174,6 +160,7 @@ const HARNESS_HELP = `
 
 这里连着你电脑上的 Harness：可以让我查资料、读网页、处理工作区里的文件，回复会实时显示，思考过程折叠在卡片里；需要你确认的操作，我会先发卡片问你。话题内发 /settings 或点卡片「本话题设置」，可调整模型、思考深度与权限，点保存后下一轮生效；/permission 可直接切换权限。底部设置菜单先选择「新话题默认」或指定话题；默认值只用于新话题。模型与权限继续和 App 中的同一会话同步，完全权限仍需再次确认。
 子智能体回传结果后，Harness 的后续处理也会自动回复到原话题。
+也可以让我画图或展示工作区里的图片，图片会和说明一起出现在回复中；每次最多 4 张、每张 10 MB。
 可直接发图片（需要宿主与模型支持图片输入）；在电脑设置中启用语音后，可发送 60 秒以内语音，识别成文字继续对话。`;
 const ADVANCED_HELP = `高级命令（按需使用）：
 /new 或 /reset：创建新的飞书话题，在新话题里开始；旧话题和长期记忆保留
@@ -652,13 +639,22 @@ export class BotBridge {
       const files = typeof result === 'string' ? [] : result.files ?? [];
       const bounded = Array.from(answer).slice(0, this.config.maxOutputChars).join('');
       const truncated = bounded.length < answer.length;
+      const prepared = harness && this.config.responseMode !== 'text' && (live || this.transport.replyRich) && this.transport.uploadImage
+        ? await prepareReplyImages(bounded, lane.saved?.cwd ?? lane.user.cwd, path => this.transport.uploadImage!(path), controller.signal)
+        : undefined;
+      if (controller.signal.aborted || this.stopped) {
+        if (live) await conclude({phase: 'stopped', note: this.stopped ? STOPPING_TEXT : '已停止。'});
+        return;
+      }
       // The answer is already in native history. Send it before artifact work
       // that can fail, so a storage limit cannot swallow a complete reply.
       if (live) await conclude({phase: 'done', action: this.settingsAction(message), answer: bounded || (artifacts.length || files.length ? '已整理好，见下方。' : 'dsh 本次没有返回文本。'),
+        images: prepared?.images,
         ...(typeof result !== 'string' && result.reasoning ? {reasoning: result.reasoning} : {}), ...(truncated ? {note: '回复已截断。'} : {})});
-      else if (bounded || !artifacts.length) await this.reply(message, bounded ? bounded + (truncated ? '\n\n（回复已截断）' : '') : 'dsh 本次没有返回文本。', controller.signal);
+      else if (bounded || !artifacts.length) await this.sendPayloads(message, renderAnswer(bounded ? bounded + (truncated ? '\n\n（回复已截断）' : '') : 'dsh 本次没有返回文本。',
+        this.config.chunkBytes, prepared?.images), controller.signal);
       await this.presentArtifacts(message, lane, artifacts, controller.signal);
-      await this.deliverFiles(message, lane, files, controller.signal);
+      await this.deliverFiles(message, lane, files, controller.signal, prepared?.attemptedPaths);
       this.audit({stage: 'replied', messageId: message.messageId});
     } catch (error) {
       clearTimeout(timer);
@@ -859,7 +855,7 @@ export class BotBridge {
   }
 
   /** Send files the host's delivery tool presented, from this user's workspace only. */
-  private async deliverFiles(message: RoutedMessage, lane: Lane, files: readonly DeliveredFile[], signal: AbortSignal): Promise<void> {
+  private async deliverFiles(message: RoutedMessage, lane: Lane, files: readonly DeliveredFile[], signal: AbortSignal, attemptedImages?: ReadonlySet<string>): Promise<void> {
     if (!files.length || signal.aborted || this.stopped) return;
     const workspace = await realpath(lane.saved?.cwd ?? lane.user.cwd).catch(() => undefined);
     const notes: string[] = [];
@@ -868,6 +864,7 @@ export class BotBridge {
       const name = basename(file.path);
       const checked = workspace && this.transport.replyFile ? await uploadable(workspace, file.path) : {reason: '这个连接不能发送文件'};
       if ('reason' in checked) { notes.push(`${name}：${checked.reason}（电脑上的位置：${file.path}）`); continue; }
+      if (attemptedImages?.has(checked.path)) continue;
       const idempotencyKey = createHash('sha256').update(JSON.stringify([this.config.botOpenId, message.requestId ?? message.messageId, 'file', index, checked.path]))
         .digest('hex').slice(0, 48);
       try {

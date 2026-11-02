@@ -111,6 +111,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.76.0",
+    "mdast-util-from-markdown": "2.0.2",
     "qrcode": "1.5.4"
   },
   "packageManager": "pnpm@11.22.0"

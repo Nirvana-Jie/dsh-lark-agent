@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderAnswer, renderPanel, safePlainText, type ReplyPayload } from '../src/replies.js';
+import { cardMarkdown, renderAnswer, renderPanel, safePlainText, type ReplyPayload } from '../src/replies.js';
 
 function cardOf(payload: ReplyPayload): Record<string, unknown> {
   expect(payload.kind).toBe('card');
@@ -15,6 +15,83 @@ function components(value: unknown, tag: string): Record<string, unknown>[] {
 }
 
 describe('answer presentation', () => {
+  it('renders only confirmed images in place while keeping code and platform markup inert', () => {
+    const source = 'DSHLARKIMAGE0END\n\n前言\n![图 <at id=all>](<chart one.png>)\n\n![另一张](img_v3_forged)\n\n`![示例](chart one.png)`\n\n<at id=all>所有人</at>';
+    const images = new Map([['chart one.png', {imageKey: 'img_v3_confirmed'}]]);
+    const result = cardMarkdown(source, images);
+    expect(result).toContain('DSHLARKIMAGE0END');
+    expect(result).toContain('![图  at id=all ](img_v3_confirmed)');
+    expect(result).not.toContain('![另一张]');
+    expect(result).not.toContain('<at');
+    expect(result).toContain('`![示例](chart one.png)`');
+    expect(renderAnswer(source, 4000, images)).toEqual([{kind: 'post', markdown: result}]);
+  });
+
+  it('keeps image references and a long illustrated reply in one rich post', () => {
+    const source = `# 图解\n\n![引用][chart]\n\n## 说明\n${'正文内容。'.repeat(250)}\n\n[chart]: chart.png`;
+    const [payload] = renderAnswer(source, 4000, new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]]));
+    expect(payload?.kind).toBe('post');
+    if (payload?.kind !== 'post') throw new Error();
+    expect(payload.markdown).toContain('![引用](img_v3_confirmed)');
+    expect(payload.markdown).not.toContain('chart.png');
+    expect(payload.markdown).toContain('正文内容。'.repeat(250));
+  });
+
+  it.each([
+    '中'.repeat(9000) + '\n\n![图](chart.png)\n\n后记',
+    '😀中'.repeat(4000) + '![图](chart.png)' + '后记'.repeat(5000),
+    '"'.repeat(9000) + '![图](chart.png)' + '\\'.repeat(9000),
+    '中'.repeat(9000) + '\n\n![图][chart]\n\n后记\n\n[chart]: chart.png',
+  ])('paginates an oversized illustrated reply without losing prepared images or prose (%#)', source => {
+    const images = new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]]);
+    const payloads = renderAnswer(source, 4000, images);
+    expect(payloads.length).toBeGreaterThan(1);
+    expect(payloads.every(payload => payload.kind === 'post')).toBe(true);
+    expect(payloads.map(payload => payload.kind === 'post' ? payload.markdown : '').join('')).toBe(cardMarkdown(source, images));
+    for (const payload of payloads) {
+      if (payload.kind !== 'post') throw new Error('Expected a rich page');
+      const post = {zh_cn: {content: [[{tag: 'md', text: payload.markdown}]]}};
+      expect(Buffer.byteLength(JSON.stringify(post))).toBeLessThanOrEqual(24_000);
+      expect(Buffer.byteLength(JSON.stringify({msg_type: 'post', content: JSON.stringify(post), uuid: 'x'.repeat(50), reply_in_thread: true}))).toBeLessThanOrEqual(28_000);
+    }
+  });
+
+  it.each(['```', '~~~', '````'])('keeps oversized %s code inert while delivering adjacent confirmed images', fence => {
+    const code = `${fence}html\n${'const value = "你好😀";\n'.repeat(2000)}<at user_id="all">示例</at>\n![代码示例](chart.png)\n${fence}\n\n`;
+    const source = '![前图](chart.png)\n\n' + code + '![后图](chart.png)';
+    const images = new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]]);
+    const payloads = renderAnswer(source, 4000, images);
+    const posts = payloads.flatMap(payload => payload.kind === 'post' ? [payload.markdown] : []);
+    const plain = payloads.flatMap(payload => payload.kind === 'text' ? [payload.text] : []);
+    expect(posts.join('')).toBe('![前图](img_v3_confirmed)\n\n![后图](img_v3_confirmed)');
+    expect(plain.join('')).toBe(safePlainText(code));
+    expect(plain.every(part => Buffer.byteLength(part) <= 4000 && !part.includes('<at') && !part.includes('\ufffd'))).toBe(true);
+  });
+
+  it('keeps a prepared image before an unclosed code fence without activating its native tags', () => {
+    const source = '![图](chart.png)\n\n```html\n<at user_id="all">示例</at>';
+    const payloads = renderAnswer(source, 4000, new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]]));
+    expect(payloads).toEqual([
+      {kind: 'post', markdown: '![图](img_v3_confirmed)\n\n'},
+      {kind: 'text', text: '```html\n‹at user_id="all"›示例‹/at›'},
+    ]);
+  });
+
+  it('retains a reference definition also used by an ordinary link', () => {
+    const source = '![图][chart]\n[原图][chart]\n\n[chart]: chart.png';
+    const result = cardMarkdown(source, new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]]));
+    expect(result).toContain('![图](img_v3_confirmed)');
+    expect(result).toContain('[原图][chart]');
+    expect(result).toContain('chart.png');
+  });
+
+  it('explains image failures without losing surrounding prose or trusting a malformed upload key', () => {
+    const source = '前言\n\n![图](missing.png)\n\n后记';
+    expect(cardMarkdown(source, new Map([['missing.png', {reason: '找不到这个文件'}]])))
+      .toBe('前言\n\n（图片未显示：找不到这个文件；电脑上的位置：missing.png）\n\n后记');
+    expect(cardMarkdown(source, new Map([['missing.png', {imageKey: 'img_x)\n<at id=all>'}]]))).not.toContain('![图]');
+  });
+
   it('keeps ordinary short conversation as a text message', () => {
     expect(renderAnswer('好的，明天继续。', 4000)).toEqual([{kind: 'text', text: '好的，明天继续。'}]);
     expect(renderAnswer('示例短句42', 4000)).toEqual([{kind: 'text', text: '示例短句42'}]);

@@ -63,16 +63,17 @@ function tokens(payload: ReplyPayload | undefined): string[] {
 const EFFORTS = [{id: 'low', name: '低'}, {id: 'high', name: '高'}];
 const PERMISSIONS = [{id: 'read-only', name: '仅可查看'}, {id: 'workspace-write', name: '工作区内修改'}, {id: 'danger-full-access', name: '完全权限'}];
 
-async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; initialPermission?: string; shared?: boolean; turnTimeoutMs?: number; topics?: boolean; menus?: boolean; maxPendingPerSession?: number} = {}) {
+async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; textOnly?: boolean; restricted?: boolean; createCardEntity?: () => Promise<string>; permissions?: boolean; models?: boolean; defaultPreset?: string; initialPermission?: string; shared?: boolean; turnTimeoutMs?: number; topics?: boolean; menus?: boolean; maxPendingPerSession?: number} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-channel-bridge-'));
   directories.push(directory);
   const workspace = join(directory, 'alice');
   await mkdir(workspace, {recursive: true});
   const config = parseConfig({profile: 'channel-test', botOpenId: 'ou_bot', stateDir: join(directory, 'state'),
     cardInteractions: options.cards ?? true, streamingCards: options.streaming ?? true, loadingReaction: true, botMenu: options.menus ?? false,
+    ...(options.textOnly ? {responseMode: 'text'} : {}),
     ...(options.turnTimeoutMs ? {turnTimeoutMs: options.turnTimeoutMs} : {}),
     ...(options.maxPendingPerSession ? {maxPendingPerSession: options.maxPendingPerSession} : {}),
-    users: [{openId: 'ou_alice', direct: true, directMode: 'harness', groupChats: ['oc_group'], cwd: workspace}]});
+    users: [{openId: 'ou_alice', direct: true, directMode: options.restricted ? 'restricted' : 'harness', groupChats: ['oc_group'], cwd: workspace}]});
   const sessions = await SessionStore.open(config.stateDir);
   const memories = await MemoryStore.open(config.stateDir);
   const actions = await CardActions.open(config.stateDir, 'channel-test:ou_bot');
@@ -124,6 +125,7 @@ async function setup(options: {run?: Run; streaming?: boolean; cards?: boolean; 
     replyCardEntity: vi.fn(async () => undefined),
     streamCardText: vi.fn(async () => undefined),
     updateCardEntity: vi.fn(async (_id: string, _card: Record<string, unknown>, _sequence: number) => undefined),
+    uploadImage: vi.fn(async (_path: string) => 'img_v3_workspace'),
     replyFile: vi.fn(async (_id: string, _path: string, _options: {idempotencyKey: string; inThread: boolean; image: boolean}) => undefined),
     ...(options.topics ? {openTopic: vi.fn(async () => {
       const index = ++topicCount;
@@ -788,6 +790,103 @@ describe('BotBridge harness channel', () => {
     await h.bridge.accept(callback(submit!, {action_name: 'dsh_submit', form_value: JSON.stringify({q0: ['o0', 'o2'], c0: '', c1: 'lark-agent'})}));
     await turn;
     expect(h.sentText().at(-1)).toBe(JSON.stringify([{id: 'langs', selected: ['TypeScript', 'Rust']}, {id: 'name', selected: [], custom: 'lark-agent'}]));
+  });
+
+  it('shows a workspace Markdown image inside the final reply card', async () => {
+    const h = await setup();
+    await mkdir(join(h.workspace, 'review'), {recursive: true});
+    await writeFile(join(h.workspace, 'review', 'diagram.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9ioAAAAASUVORK5CYII=', 'base64'));
+    h.run.mockResolvedValue('画好了：\n\n![架构对比](review/diagram.png)\n\n下面是说明。');
+    await h.bridge.accept(event('画张图'));
+    expect(h.transport.uploadImage).toHaveBeenCalledWith(join(await realpath(h.workspace), 'review', 'diagram.png'));
+    expect(h.finalCard()).toContain('img_v3_workspace');
+    expect(h.finalCard()).not.toContain('review/diagram.png');
+    expect(h.finalCard()).toContain('下面是说明。');
+    expect(h.transport.replyCardEntity).toHaveBeenCalledTimes(1);
+    expect(h.transport.replyFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['disabled', 'unavailable'] as const)('renders an inline image in a rich post when streaming is %s', async mode => {
+    const h = await setup({streaming: mode !== 'disabled', createCardEntity: async () => {throw new Error('unavailable');}});
+    await writeFile(join(h.workspace, 'chart.png'), 'image');
+    h.run.mockResolvedValue('画好了：\n\n![图](chart.png)\n\n说明。');
+    await h.bridge.accept(event('画图'));
+    expect(h.transport.replyRich).toHaveBeenCalledWith(expect.any(String),
+      {kind: 'post', markdown: '画好了：\n\n![图](img_v3_workspace)\n\n说明。'}, expect.any(Object));
+    expect(h.transport.uploadImage).toHaveBeenCalledTimes(1);
+    expect(h.transport.replyCardEntity).not.toHaveBeenCalled();
+  });
+
+  it.each(['disabled', 'unavailable'] as const)('preserves prepared images in an oversized reply when streaming is %s', async mode => {
+    const h = await setup({topics: true, streaming: mode !== 'disabled', createCardEntity: async () => {throw new Error('unavailable');}});
+    const path = join(h.workspace, 'chart.png'); await writeFile(path, 'image');
+    h.run.mockResolvedValue({text: '中'.repeat(9000) + '\n\n![图](chart.png)\n\n后记', artifacts: [], files: [{path, description: '图'}]});
+    await h.bridge.accept(event('写长图解'));
+    const replies = h.transport.replyRich.mock.calls;
+    expect(replies.some(call => call[1].kind === 'post' && call[1].markdown.includes('![图](img_v3_workspace)'))).toBe(true);
+    expect(h.sentText().join('')).toBe('中'.repeat(9000) + '\n\n![图](img_v3_workspace)\n\n后记');
+    expect(replies.every(call => call[0] === 'om_topic_1' && (call[2] as {inThread: boolean}).inThread)).toBe(true);
+    expect(h.transport.uploadImage).toHaveBeenCalledTimes(1);
+    expect(h.transport.replyFile).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('does not upload an inline image twice through presented files, including unknown uploads: %s', async unknown => {
+    const h = await setup({topics: true});
+    const path = join(h.workspace, 'chart.png'); await writeFile(path, 'image');
+    if (unknown) h.transport.uploadImage.mockRejectedValue(new Error('timeout'));
+    h.run.mockResolvedValue({text: '![图](chart.png)\n\n![再看一次](./chart.png)', artifacts: [], files: [{path, description: '图'}]});
+    await h.bridge.accept(event('画图'));
+    expect(h.transport.uploadImage).toHaveBeenCalledTimes(1);
+    expect(h.transport.replyFile).not.toHaveBeenCalled();
+    expect(h.transport.replyCardEntity).toHaveBeenCalledExactlyOnceWith('om_topic_1', '7355', expect.objectContaining({inThread: true}));
+    if (unknown) expect(h.finalCard()).toContain('图片上传未确认');
+    else expect(h.finalCard().match(/img_v3_workspace/g)).toHaveLength(2);
+  });
+
+  it.each(['text', 'restricted', 'group'] as const)('does not upload answer images for %s replies', async mode => {
+    const h = await setup({textOnly: mode === 'text', restricted: mode === 'restricted'});
+    await writeFile(join(h.workspace, 'chart.png'), 'image');
+    h.run.mockResolvedValue('![图](chart.png)');
+    await h.bridge.accept(mode === 'group' ? group('画图') : event('画图'));
+    expect(h.transport.uploadImage).not.toHaveBeenCalled();
+  });
+
+  it('uploads only checkpointed final images, not streamed drafts or failed saves', async () => {
+    const h = await setup(); await writeFile(join(h.workspace, 'draft.png'), 'image');
+    h.run.mockImplementation(async (_text, _signal, _context, observer) => {
+      observer!.stream!({type: 'text', text: '![草稿](draft.png)'});
+      expect(h.transport.uploadImage).not.toHaveBeenCalled();
+      return '最终回答没有图片';
+    });
+    await h.bridge.accept(event('first')); expect(h.transport.uploadImage).not.toHaveBeenCalled();
+    h.run.mockImplementation(async () => {
+      h.handles.at(-1)!.checkpoint.mockRejectedValue(new Error('save failed'));
+      return '![图](draft.png)';
+    });
+    await h.bridge.accept(event('second')); expect(h.transport.uploadImage).not.toHaveBeenCalled();
+  });
+
+  it('does not finish or deliver remaining files after cancellation during an image upload', async () => {
+    const h = await setup(); const path = join(h.workspace, 'chart.png'); await writeFile(path, 'image');
+    let complete!: (key: string) => void;
+    h.transport.uploadImage.mockImplementation(() => new Promise(resolve => {complete = resolve;}));
+    h.run.mockResolvedValue({text: '![图](chart.png)', artifacts: [], files: [{path, description: '图'}]});
+    const turn = h.bridge.accept(event('画图'));
+    await vi.waitFor(() => expect(h.transport.uploadImage).toHaveBeenCalledTimes(1));
+    await h.bridge.accept(event('/stop'));
+    complete('img_v3_workspace'); await turn;
+    expect(h.finalCard()).toContain('已停止');
+    expect(h.finalCard()).not.toContain('img_v3_workspace');
+    expect(h.transport.replyFile).not.toHaveBeenCalled();
+  });
+
+  it('uses the same inline image delivery for a checkpointed continuation in the original topic', async () => {
+    const h = await setup({topics: true}); await h.bridge.accept(event('first'));
+    await writeFile(join(h.workspace, 'chart.png'), 'image');
+    await h.continueTurn(0, hostTurn('image-continuation', async () => '更新：\n\n![图](chart.png)'));
+    expect(h.transport.uploadImage).toHaveBeenCalledTimes(1);
+    expect(h.finalCard()).toContain('img_v3_workspace');
+    expect(h.transport.replyCardEntity.mock.calls.at(-1)).toEqual(['om_topic_1', '7355', expect.objectContaining({inThread: true})]);
   });
 
   it('sends presented workspace files and only names files it may not upload', async () => {
