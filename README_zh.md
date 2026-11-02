@@ -35,7 +35,7 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) 会调用 pnpm，需先装好 pnpm 并确保它在 PATH 中：
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.6.1 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.2 --allow-build=protobufjs
 ```
 
 然后重启 `dsh web`。
@@ -53,7 +53,7 @@ dsh plugin --profile web add dsh-lark-agent@0.6.1 --allow-build=protobufjs
 
 新版本发布满一天后，飞书设置页顶部会提示并给出下面的步骤（桌面版还能一键打开插件列表）。在此之前，未指定精确版本的安装和更新（包括 `@latest`）仍会选择之前的版本：pnpm 11 默认跳过发布不满 24 小时的版本。刚发布时可用上方安装示例中的精确版本安装本次版本。若安装时装上旧版并提示与当前 DeepSeek Harness 不兼容，见[排障](DEVELOPMENT.md#排障)。
 
-App `0.2.1-rc.5` 需要插件 `0.6.1` 的兼容更新；插件 `0.6.0` 只声明支持到 rc.3。兼容版本发布后安装该版本，或使用[从源码构建的安装包](DEVELOPMENT.md#开发与测试)。
+App `0.2.1-rc.5` 需要插件 `0.6.1` 或更新版本；插件 `0.6.0` 只声明支持到 rc.3。本次版本发布后使用上方安装命令，或使用[从源码构建的安装包](DEVELOPMENT.md#开发与测试)。
 
 1. 在飞书设置页点「暂停连接」，按[升级](DEVELOPMENT.md#升级)备份。
 2. 桌面版：在插件页卸载 `dsh-lark-agent` 后重新添加（弹窗提示第三方插件需先卸载再安装新版；rc.5 已验证本地构建包升级；更早从源码安装的版本显示为 `dsh-larkbot`）。CLI：运行 `dsh plugin --profile web update dsh-lark-agent@latest`，再重启 `dsh web`。
