@@ -35,7 +35,7 @@ In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.6.1 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.2 --allow-build=protobufjs
 ```
 
 Then restart `dsh web`.
@@ -53,7 +53,7 @@ Then restart `dsh web`.
 
 When a new version has been out for a day, the Feishu settings page shows a notice with these steps (in the desktop app it also opens the plugin list for you). Until then, installs without an exact version, including `@latest`, still select the previous version because pnpm 11 skips releases less than 24 hours old. Use the exact version in the installation example above to install this release immediately after publication. If an install picks an older version that your DeepSeek Harness rejects as incompatible, see [Troubleshooting](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#排障).
 
-App `0.2.1-rc.5` needs the compatibility update in plugin `0.6.1`; plugin `0.6.0` only declares support through rc.3. Install the compatible version after publication, or use a [source-built package](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#开发与测试).
+App `0.2.1-rc.5` requires plugin `0.6.1` or later; plugin `0.6.0` only declares support through rc.3. Use the installation command above after publication, or use a [source-built package](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#开发与测试).
 
 1. On the Feishu settings page, click **暂停连接** (pause) and back up as described in [Upgrade](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级).
 2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (upgrading with a local build was verified on rc.5; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.

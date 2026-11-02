@@ -117,7 +117,7 @@ App 从设置侧栏的一级「飞书 agent」进入独立管理页，旧 Web �
 
 项目改名为 dsh-lark-agent 后，插件 ID、数据目录 `~/.dsh-larkbot/` 与日志前缀 `[im-larkbot]` 保持不变，升级无需迁移数据。
 
-App 升级到 `0.2.1-rc.5` 后，插件 `0.6.0` 会因精确宿主版本声明只到 rc.3 而显示「已安装，与当前 dsh 不兼容」。插件 `0.6.1` 增加 rc.5 声明，相关宿主运行时代码与 rc.3 相同。待该版本发布后升级插件，或按[从源码安装](#开发与测试)使用本地构建包；仅重启旧版插件不能补上兼容声明。
+App 升级到 `0.2.1-rc.5` 后，插件 `0.6.0` 会因精确宿主版本声明只到 rc.3 而显示「已安装，与当前 dsh 不兼容」。插件 `0.6.1` 增加 rc.5 声明，相关宿主运行时代码与 rc.3 相同。升级到 `0.6.1` 或更新版本，或按[从源码安装](#开发与测试)使用本地构建包；仅重启旧版插件不能补上兼容声明。
 
 ## 私聊底部菜单
 
@@ -310,7 +310,7 @@ dsh --profile feishu-team --dump-config > .runtime/composed.yml
 
 - 转储须含 `im-larkbot`、`agent`、`tools`、`session-persistence-jsonl`（自定义 profile 默认带 `@deepseek-ai/dsh-base`），可能含敏感信息，只留在 `.runtime/`。
 - 插件依赖宿主服务 `agents`、`tools`、`sessions`、`sessionPersistence`。自定义配置写到 `$DSH_HOME/profiles/feishu-team/cordis.patch.yml`（不改启动时重建的 `cordis.yml`），并保留 JSONL 持久化后端。
-- 通过 npm 安装（对应版本发布后）：`dsh plugin --profile feishu-team add dsh-lark-agent@0.6.1 --allow-build=protobufjs`；或 `pnpm pack` 后用 tgz 的绝对路径（如 `/absolute/path/to/dsh-lark-agent-0.6.1.tgz`）代替包名。不带 `--allow-build=protobufjs` 时 pnpm 11 会以 `ERR_PNPM_IGNORED_BUILDS` 失败、插件不会加入 profile，可再运行 `dsh plugin --profile feishu-team approve-builds '!protobufjs'` 补救。包内不含 `scripts/`，只能用通用启动命令。
+- 通过 npm 安装（对应版本发布后）：`dsh plugin --profile feishu-team add dsh-lark-agent@0.6.2 --allow-build=protobufjs`；或 `pnpm pack` 后用 tgz 的绝对路径（如 `/absolute/path/to/dsh-lark-agent-0.6.2.tgz`）代替包名。不带 `--allow-build=protobufjs` 时 pnpm 11 会以 `ERR_PNPM_IGNORED_BUILDS` 失败、插件不会加入 profile，可再运行 `dsh plugin --profile feishu-team approve-builds '!protobufjs'` 补救。包内不含 `scripts/`，只能用通用启动命令。
 
 ### 4. 启动与验收
 
@@ -370,7 +370,7 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm pack
 | --- | --- |
 | 没有「飞书」设置页，或页面无法加载 | 插件已装入当前宿主并启用；`dsh plugin` 若报 `ERR_PNPM_IGNORED_BUILDS`（随后 dsh 提示 `pnpm failed in profile directory`），运行 `dsh plugin --profile <profile> approve-builds '!protobufjs'` 后重启 → 源码安装须用 `pnpm pack` 的产物（含 `dist/client.cjs`）→ `configFile` 与 `DSH_LARK_CONFIG` 均为空（见[两种运行方式](#两种运行方式)） |
 | 升级后点「立即启用」长时间等待 | rc.5 本地包升级时曾遇到启用配置已保存、界面仍等待的情况 → 从 App 菜单正常退出，确认宿主已退出后再启动，使其从已保存配置加载 → 检查插件运行状态与飞书连接；保留连接资料和锁文件，不通过删除资料或手动删锁促使加载 |
-| App rc.5 显示「已安装，与当前 dsh 不兼容」 | 核对实际安装的插件版本 → 插件 `0.6.0` 的精确 peer 声明未包含 `0.2.1-rc.5`，安装带 rc.5 声明的 `0.6.1`（发布后）或[源码构建包](#开发与测试)，按[升级](#升级)保留连接与历史 → 发布不足 24 小时还需核对是否仍装上旧版，见下一行 |
+| App rc.5 显示「已安装，与当前 dsh 不兼容」 | 核对实际安装的插件版本 → 插件 `0.6.0` 的精确 peer 声明未包含 `0.2.1-rc.5`，安装带 rc.5 声明的 `0.6.1` 或更新版本，或使用[源码构建包](#开发与测试)，按[升级](#升级)保留连接与历史 → 发布不足 24 小时还需核对是否仍装上旧版，见下一行 |
 | 安装失败，提示某个较旧版本与当前 dsh 不兼容（插件页显示的却是更新的版本） | 新版本发布不满 24 小时，pnpm 11 改装了之前的版本（安装详情里 pnpm 输出的 `+ dsh-lark-agent <版本>` 是实际装上的版本）→ 发布满 24 小时后点「重试」→ CLI 急需时用精确版本号安装：`dsh plugin --profile <profile> update dsh-lark-agent@<版本>`，pnpm 会把该版本记入 profile 的 `minimumReleaseAgeExclude` |
 | 提示找不到 Lark CLI | Lark CLI 装在宿主所在机器 → 插件启动时只查找一次 `PATH`、`~/.local/bin`、`~/.npm-global/bin`、`/opt/homebrew/bin`、`/usr/local/bin`，后装须重启宿主或重新启用插件 → 仍不行则在插件配置 `executable` 填绝对路径 |
 | 配对词发送后未连接 | 机器人已发布 → 发在本人私聊 → 配对词纯文本原样单独发送且未过期，否则「换一个配对词」→ 只认应用创建者（新建即扫码账号）→ 需要时点「这是我，完成连接」 |
