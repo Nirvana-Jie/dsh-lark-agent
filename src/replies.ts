@@ -1,5 +1,5 @@
 import { chunksByBytes } from './message.js';
-import {withReplyImages, type ReplyImages} from './markdown-images.js';
+import {markdownImages, withReplyImages, type ReplyImages} from './markdown-images.js';
 
 export type ReplyPayload =
   | {kind: 'text'; text: string}
@@ -311,6 +311,51 @@ function leadBlockCount(blocks: string[]): number | undefined {
   return count;
 }
 
+function fitsPost(text: string): boolean {
+  const post = {zh_cn: {content: [[{tag: 'md', text}]]}};
+  return bytes(post) <= POST_BYTES && fitsEnvelope('post', post);
+}
+
+/** Paginate sanitized image replies without splitting image tokens or re-uploading files. */
+function imageReplyPages(text: string, chunkBytes: number, images: ReplyImages): ReplyPayload[] {
+  const payloads: ReplyPayload[] = [];
+  let page = '';
+  const flush = () => {
+    if (page) payloads.push({kind: 'post', markdown: page});
+    page = '';
+  };
+  const append = (part: string) => {
+    if (!fitsPost(page + part)) flush();
+    page += part;
+  };
+  const appendText = (part: string) => {
+    for (const block of markdownBlocks(part)) {
+      if (fitsPost(block) && markdown(block).balanced) append(block);
+      else if (/`|~{3}/.test(block)) {
+        // Splitting code into independent posts could turn literal native tags
+        // into active markup. Keep the existing safe plain-text fallback here.
+        flush();
+        payloads.push(...chunksByBytes(safePlainText(block), chunkBytes).map(text => ({kind: 'text' as const, text})));
+      } else {
+        // Small UTF-8 atoms fit even after both JSON layers escape them. Pack
+        // adjacent atoms using the actual content and envelope budgets above.
+        for (const atom of chunksByBytes(block, 4_000)) append(atom);
+      }
+    }
+  };
+  const keys = new Set([...images.values()].flatMap(image => 'imageKey' in image ? [image.imageKey] : []));
+  let cursor = 0;
+  for (const image of markdownImages(text)) {
+    if (!keys.has(image.source)) continue;
+    appendText(text.slice(cursor, image.start));
+    append(text.slice(image.start, image.end));
+    cursor = image.end;
+  }
+  appendText(text.slice(cursor));
+  flush();
+  return payloads;
+}
+
 /** Select presentation without asking the model to generate arbitrary card JSON. */
 export function renderAnswer(text: string, chunkBytes: number, images?: ReplyImages): ReplyPayload[] {
   if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 4) throw new Error('Reply byte limit must be an integer >= 4.');
@@ -319,10 +364,13 @@ export function renderAnswer(text: string, chunkBytes: number, images?: ReplyIma
   const formatted = /(^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|~~~)|\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(|\|[^\n]+\|/u.test(text);
   if (!formatted && !images?.size) return asText();
   const safe = markdown(text);
+  if (images?.size) {
+    const rendered = cardMarkdown(text, images);
+    return safe.balanced && fitsPost(rendered) ? [{kind: 'post', markdown: rendered}] : imageReplyPages(rendered, chunkBytes, images);
+  }
   if (!safe.balanced) return asText();
-  if (images?.size) safe.text = cardMarkdown(text, images);
   const leadCount = leadBlockCount(safe.blocks);
-  if (!images?.size && Array.from(text).length >= LONG_ANSWER && leadCount !== undefined) {
+  if (Array.from(text).length >= LONG_ANSWER && leadCount !== undefined) {
     const first = safe.blocks.slice(0, leadCount).join('');
     const rest = safe.blocks.slice(leadCount).join('');
     const panel = renderPanel({title: 'dsh · 回复', summary: plainLabel(text, 60), sections: [
@@ -332,7 +380,6 @@ export function renderAnswer(text: string, chunkBytes: number, images?: ReplyIma
   }
   // One post preserves code fences, reference links and tables as a whole. For
   // oversized content use exact text chunks instead of corrupting Markdown.
-  const post = {zh_cn: {content: [[{tag: 'md', text: safe.text}]]}};
-  if (bytes(post) <= POST_BYTES && fitsEnvelope('post', post)) return [{kind: 'post', markdown: safe.text}];
+  if (fitsPost(safe.text)) return [{kind: 'post', markdown: safe.text}];
   return asText();
 }

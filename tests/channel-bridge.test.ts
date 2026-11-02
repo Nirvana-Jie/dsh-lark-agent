@@ -817,6 +817,19 @@ describe('BotBridge harness channel', () => {
     expect(h.transport.replyCardEntity).not.toHaveBeenCalled();
   });
 
+  it.each(['disabled', 'unavailable'] as const)('preserves prepared images in an oversized reply when streaming is %s', async mode => {
+    const h = await setup({topics: true, streaming: mode !== 'disabled', createCardEntity: async () => {throw new Error('unavailable');}});
+    const path = join(h.workspace, 'chart.png'); await writeFile(path, 'image');
+    h.run.mockResolvedValue({text: '中'.repeat(9000) + '\n\n![图](chart.png)\n\n后记', artifacts: [], files: [{path, description: '图'}]});
+    await h.bridge.accept(event('写长图解'));
+    const replies = h.transport.replyRich.mock.calls;
+    expect(replies.some(call => call[1].kind === 'post' && call[1].markdown.includes('![图](img_v3_workspace)'))).toBe(true);
+    expect(h.sentText().join('')).toBe('中'.repeat(9000) + '\n\n![图](img_v3_workspace)\n\n后记');
+    expect(replies.every(call => call[0] === 'om_topic_1' && (call[2] as {inThread: boolean}).inThread)).toBe(true);
+    expect(h.transport.uploadImage).toHaveBeenCalledTimes(1);
+    expect(h.transport.replyFile).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])('does not upload an inline image twice through presented files, including unknown uploads: %s', async unknown => {
     const h = await setup({topics: true});
     const path = join(h.workspace, 'chart.png'); await writeFile(path, 'image');
