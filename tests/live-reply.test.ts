@@ -29,6 +29,28 @@ const rows = (card: unknown) => (panel(card)?.elements ?? []) as Array<Record<st
 const element = (card: unknown, id: string) => [...elements(card), ...rows(card)].find(item => item.element_id === id);
 
 describe('LiveReply streaming card', () => {
+  it('keeps a resolved reference image when the long answer is truncated before its definition', async () => {
+    const h = harness(); await h.reply.open();
+    await h.reply.finish({phase: 'done', answer: '![图][chart]\n\n' + '正文。'.repeat(10_000) + '\n\n[chart]: chart.png',
+      images: new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]])});
+    expect(element(h.last(), 'answer')?.content).toContain('![图](img_v3_confirmed)');
+    expect(element(h.last(), 'answer')?.content).not.toContain('chart.png');
+    expect(element(h.last(), 'note')?.content).toContain('长度上限');
+    expect(Buffer.byteLength(JSON.stringify(h.last()))).toBeLessThanOrEqual(28_000);
+  });
+
+  it('keeps confirmed images in the same final card through idempotent update retries', async () => {
+    let attempts = 0;
+    const h = harness({updateCardEntity: async () => {if (++attempts < 3) throw new Error('timeout');}});
+    await h.reply.open();
+    await expect(h.reply.finish({phase: 'done', answer: '前言\n\n![图](chart.png)\n\n后记',
+      images: new Map([['chart.png', {imageKey: 'img_v3_confirmed'}]])})).resolves.toBe(true);
+    expect(element(h.last(), 'answer')?.content).toBe('前言\n\n![图](img_v3_confirmed)\n\n后记');
+    expect(h.transport.replyCardEntity).toHaveBeenCalledTimes(1);
+    expect(h.transport.updateCardEntity).toHaveBeenCalledTimes(3);
+    expect(h.sequences()).toEqual([1, 2, 3]);
+  });
+
   it('keeps the ordinary reply path when the card entity cannot be created', async () => {
     const h = harness({createCardEntity: async () => { throw new Error('missing scope'); }});
     await expect(h.reply.open()).resolves.toBe(false);

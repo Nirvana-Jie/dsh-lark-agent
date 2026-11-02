@@ -1,4 +1,5 @@
 import { chunksByBytes } from './message.js';
+import {withReplyImages, type ReplyImages} from './markdown-images.js';
 
 export type ReplyPayload =
   | {kind: 'text'; text: string}
@@ -164,8 +165,8 @@ function markdown(text: string): {text: string; balanced: boolean; blocks: strin
 }
 
 /** Model text for a card markdown element, with platform extensions made inert. */
-export function cardMarkdown(text: string): string {
-  return markdown(text).text;
+export function cardMarkdown(text: string, images?: ReplyImages): string {
+  return withReplyImages(text, images, value => markdown(value).text);
 }
 
 /** Top-level blocks split at blank lines outside code fences, for cutting long text without breaking Markdown. */
@@ -311,16 +312,17 @@ function leadBlockCount(blocks: string[]): number | undefined {
 }
 
 /** Select presentation without asking the model to generate arbitrary card JSON. */
-export function renderAnswer(text: string, chunkBytes: number): ReplyPayload[] {
+export function renderAnswer(text: string, chunkBytes: number, images?: ReplyImages): ReplyPayload[] {
   if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 4) throw new Error('Reply byte limit must be an integer >= 4.');
   if (!text.trim()) return [];
   const asText = () => chunksByBytes(safePlainText(text), chunkBytes).map(part => ({kind: 'text' as const, text: part}));
   const formatted = /(^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|~~~)|\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(|\|[^\n]+\|/u.test(text);
-  if (!formatted) return asText();
+  if (!formatted && !images?.size) return asText();
   const safe = markdown(text);
   if (!safe.balanced) return asText();
+  if (images?.size) safe.text = cardMarkdown(text, images);
   const leadCount = leadBlockCount(safe.blocks);
-  if (Array.from(text).length >= LONG_ANSWER && leadCount !== undefined) {
+  if (!images?.size && Array.from(text).length >= LONG_ANSWER && leadCount !== undefined) {
     const first = safe.blocks.slice(0, leadCount).join('');
     const rest = safe.blocks.slice(leadCount).join('');
     const panel = renderPanel({title: 'dsh · 回复', summary: plainLabel(text, 60), sections: [

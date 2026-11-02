@@ -83,6 +83,7 @@ The connection's model check does not create a “飞书连接测试” conversa
 | Get asked to choose by Harness | Sends a choice card: tap an option, or fill it in and submit |
 | Tap **本话题设置** (Topic settings), or use `/settings` inside a topic | Edit that topic's model, thinking depth and permission mode; Save applies them from the next turn. The bottom settings menu lets you select a topic or edit defaults for new topics. Full access requires confirmation |
 | Ask for the result file | Sends files from its workspace straight to the chat |
+| Ask for an illustrated explanation | Displays local images from the private Harness session's workspace in the reply, alongside the explanation |
 | Say "lead with the conclusion from now on" | Remembers the preference |
 | Continue inside a topic, or use `/sessions`, `/new` | Keeps each conversation in its own native Feishu topic; reply beneath a new topic's entry card, or use the searchable, paged dropdown to reopen an earlier topic |
 | Ask for a bar chart of some numbers | Replies with a native Feishu chart card |

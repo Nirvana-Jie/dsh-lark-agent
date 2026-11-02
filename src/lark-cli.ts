@@ -9,6 +9,7 @@ import {mkdtemp, lstat, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import type {IncomingResource} from './message.js';
 import {MAX_INPUT_AUDIO_BYTES, MAX_INPUT_IMAGE_BYTES} from './media-input.js';
+import {isImageKey} from './markdown-images.js';
 
 export type LarkEventKey = 'im.message.receive_v1' | 'card.action.trigger' | 'application.bot.menu_v6';
 
@@ -583,6 +584,19 @@ export class LarkCli {
     if (options.inThread) args.push('--reply-in-thread');
     // Uploads take longer than text; the deadline still bounds an unknown result.
     await this.executeJson(args, '', 'reply', Math.max(this.commandTimeoutMs, 120_000), dirname(path));
+  }
+
+  /** Upload without sending a second message; the caller places the key in its existing reply. */
+  async uploadImage(path: string): Promise<string> {
+    const name = typeof path === 'string' ? basename(path) : '';
+    if (typeof path !== 'string' || !isAbsolute(path) || /[\\/]$/.test(path) || !name || name.length > 255
+      || /[\u0000-\u001f\u007f/\\]/.test(name) || name === '.' || name === '..') throw new Error('Invalid Lark image upload.');
+    const result = await this.executeJson(['im', 'images', 'create', '--data', '-', `--file=./${name}`, '--as', 'bot', '--format', 'json'],
+      JSON.stringify({image_type: 'message'}), 'card', Math.max(this.commandTimeoutMs, 120_000), dirname(path));
+    this.confirmFeedback(result);
+    const data = result.data as Record<string, unknown> | undefined;
+    if (!isImageKey(data?.image_key)) throw new Error('Lark image upload was not confirmed; result is unknown.');
+    return data.image_key;
   }
 
   private cardEntityData(card: Record<string, unknown>): string {

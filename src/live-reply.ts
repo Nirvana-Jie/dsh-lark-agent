@@ -1,5 +1,6 @@
 import type {TurnStreamEvent} from './dsh-runtime.js';
 import {cardMarkdown, markdownBlocks, plainLabel, replyActionButton, type ReplyAction} from './replies.js';
+import type {ReplyImages} from './markdown-images.js';
 
 export interface LiveCardTransport {
   createCardEntity(card: Record<string, unknown>): Promise<string>;
@@ -18,6 +19,7 @@ export interface LiveReplyFinal {
   phase: 'done' | 'stopped' | 'failed';
   /** Authoritative answer text; replaces whatever was streamed. */
   answer?: string;
+  images?: ReplyImages;
   reasoning?: string;
   /** Trusted application text shown under the answer. */
   note?: string;
@@ -109,6 +111,7 @@ function tail(text: string, maxBytes: number): string {
  * another message.
  */
 export class LiveReply {
+  private finalImages?: ReplyImages;
   private phase: 'thinking' | 'answering' | LiveReplyFinal['phase'] = 'thinking';
   private readonly steps: Step[] = [];
   private nextStep = 0;
@@ -229,6 +232,7 @@ export class LiveReply {
     this.finishedAt = this.now();
     this.phase = final.phase;
     if (final.answer !== undefined) this.answer = final.answer;
+    this.finalImages = final.images;
     if (final.reasoning && !this.steps.some(step => step.kind === 'reasoning')) this.steps.unshift({id: this.nextStep++, kind: 'reasoning', text: final.reasoning});
     for (const step of this.steps) if (step.kind === 'tool' && step.state === 'running') step.state = final.phase === 'done' ? 'done' : 'failed';
     this.note = final.note;
@@ -420,13 +424,13 @@ export class LiveReply {
     return shown;
   }
 
-  /** Live layout when final is undefined; a final layout otherwise (null leaves out the panel's rows). */
+  /** Live layout, or a final layout with already-sanitized answer text (null omits the panel's rows). */
   private card(final?: {answer: string; rows: Record<string, unknown>[] | null; truncated: boolean}): Record<string, unknown> {
     const elements: Record<string, unknown>[] = [];
     if (!final) elements.push(this.panel(this.rows(Math.max(1_000, CARD_BYTES - 3_000 - bytes(this.answerContent())))));
     else if (final.rows) elements.push(this.panel(final.rows));
     elements.push({tag: 'markdown', element_id: 'answer',
-      content: final ? (final.answer.trim() ? cardMarkdown(final.answer) : grey('（没有文字回复）')) : this.answerContent()});
+      content: final ? (final.answer.trim() ? final.answer : grey('（没有文字回复）')) : this.answerContent()});
     const note = [this.note, final?.truncated ? TRUNCATED : undefined].filter(Boolean).join(' ');
     if (final && note) elements.push({tag: 'markdown', element_id: 'note', content: grey(cardMarkdown(note)), text_size: 'notation'});
     if (this.footer) elements.push({tag: 'markdown', element_id: 'footer', text_size: 'notation',
@@ -445,12 +449,14 @@ export class LiveReply {
   private finalCard(): Record<string, unknown> {
     // Reserve room for the folded title, so its time and tool count stay visible even beside a long answer.
     const minimal = this.steps.length ? [{tag: 'markdown', element_id: 'omitted', text_size: 'notation', content: grey('过程较长，卡片里没有显示；完整过程在电脑上的这段 Harness 会话里。')}] : null;
-    let answer = this.answer, truncated = false;
+    // Resolve reference images before truncation can remove their definitions.
+    const rendered = cardMarkdown(this.answer, this.finalImages);
+    let answer = rendered, truncated = false;
     const fits = (candidate: string, rows: Record<string, unknown>[] | null) => bytes(this.card({answer: candidate, rows, truncated})) <= CARD_BYTES;
     if (!fits(answer, minimal)) {
       truncated = true;
       // Cut between top-level blocks so what is shown stays valid Markdown.
-      const blocks = markdownBlocks(this.answer);
+      const blocks = markdownBlocks(rendered);
       let low = 1, high = blocks.length - 1, best = 0;
       while (low <= high) {
         const middle = (low + high) >> 1;
@@ -461,8 +467,8 @@ export class LiveReply {
       else {
         // One oversized block, such as a long code listing: cut it by size.
         let budget = 20_000;
-        answer = head(this.answer, budget);
-        while (answer && !fits(answer, minimal)) answer = head(this.answer, budget = Math.floor(budget * 0.7));
+        answer = head(rendered, budget);
+        while (answer && !fits(answer, minimal)) answer = head(rendered, budget = Math.floor(budget * 0.7));
       }
     }
     if (minimal) {
