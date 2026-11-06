@@ -16,7 +16,7 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 
 开始前：
 
-- DeepSeek Harness 正在运行、能正常对话并已选好默认模型：PC App `0.2.1-rc.5`（`0.2.1-rc.2`、`rc.3` 同样可用），或 Web / `dsh` CLI `0.1.1-rc.2`。
+- DeepSeek Harness 正在运行、能正常对话并已选好默认模型：PC App `0.2.2-rc.1`（`0.2.1-rc.2`、`rc.3`、`rc.5` 同样可用），或 Web / `dsh` CLI `0.1.1-rc.2`。
 - 在同一台机器上**先**装好官方 Lark CLI，再启用插件（需要 Node.js / npm）：
 
   ```sh
@@ -35,7 +35,7 @@ dsh-lark-agent 给运行中的 DeepSeek Harness 加一个飞书私聊入口：�
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) 会调用 pnpm，需先装好 pnpm 并确保它在 PATH 中：
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.6.2 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.3 --allow-build=protobufjs
 ```
 
 然后重启 `dsh web`。
@@ -53,7 +53,7 @@ dsh plugin --profile web add dsh-lark-agent@0.6.2 --allow-build=protobufjs
 
 新版本发布满一天后，飞书设置页顶部会提示并给出下面的步骤（桌面版还能一键打开插件列表）。在此之前，未指定精确版本的安装和更新（包括 `@latest`）仍会选择之前的版本：pnpm 11 默认跳过发布不满 24 小时的版本。刚发布时可用上方安装示例中的精确版本安装本次版本。若安装时装上旧版并提示与当前 DeepSeek Harness 不兼容，见[排障](DEVELOPMENT.md#排障)。
 
-App `0.2.1-rc.5` 需要插件 `0.6.1` 或更新版本；插件 `0.6.0` 只声明支持到 rc.3。本次版本发布后使用上方安装命令，或使用[从源码构建的安装包](DEVELOPMENT.md#开发与测试)。
+插件 `0.6.2` 及更早版本逐个列出精确的宿主版本，App 升级到 `0.2.2-rc.1` 后会显示「已安装，与当前 dsh 不兼容」并跳过加载。插件 `0.6.3` 改用一条 `engines.dsh` 范围并适配 0.2.2 的运行时接口：升级一次到 `0.6.3`，之后 DSH 0.x 的补丁与 rc 更新不再需要发新插件版本。本次版本发布后使用上方安装命令，或使用[从源码构建的安装包](DEVELOPMENT.md#开发与测试)。
 
 1. 在飞书设置页点「暂停连接」，按[升级](DEVELOPMENT.md#升级)备份。
 2. 桌面版：在插件页卸载 `dsh-lark-agent` 后重新添加（弹窗提示第三方插件需先卸载再安装新版；rc.5 已验证本地构建包升级；更早从源码安装的版本显示为 `dsh-larkbot`）。CLI：运行 `dsh plugin --profile web update dsh-lark-agent@latest`，再重启 `dsh web`。
@@ -96,7 +96,7 @@ App `0.2.1-rc.5` 需要插件 `0.6.1` 或更新版本；插件 `0.6.0` 只声明
 ## 须知
 
 - **更多文档**：命令、隐私、升级、底部菜单、团队部署与排障见[使用与开发文档](DEVELOPMENT.md)。
-- **兼容性**：已在 PC App `0.2.1-rc.2` 与 `dsh` CLI / Web `0.1.1-rc.2` 上完整验证；PC App `0.2.1-rc.3` 通过了真实宿主的接口测试，插件可正常加载和连接（rc.3 上的扫码新建连接尚未实测）。PC App `0.2.1-rc.5` 已验证真实宿主接口、本地包升级、插件加载、原连接恢复、暂停恢复和宿主重启；rc.5 上的首次扫码与真实本人私聊回复尚未实测。其他版本、平台和企业租户尚未逐一验证。
+- **兼容性**：已在 PC App `0.2.1-rc.2` 与 `dsh` CLI / Web `0.1.1-rc.2` 上完整验证；PC App `0.2.1-rc.3`、`rc.5` 通过了真实宿主的接口测试，插件可正常加载（rc.3/rc.5 上的扫码新建连接尚未实测）。PC App `0.2.2-rc.1` 已通过真实宿主接口测试，覆盖会话创建与恢复、共享模型记录、原生工具、审批与提问、持久化和 fork/恢复；rc.1 上的首次扫码、真实本人私聊回复、安装升级、暂停恢复与宿主重启尚未实测。插件以一条 `engines.dsh` 范围声明 0.x 宿主，DSH 0.x 更新不需要发新插件版本；DSH 1.0 或破坏性原生接口变化仍需发版。其他版本、平台和企业租户尚未逐一验证。
 
 ## 许可证
 

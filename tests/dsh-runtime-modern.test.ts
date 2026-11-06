@@ -27,6 +27,10 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     await mount(sessions.SessionStore);
     await mount(prompts.SystemPrompt, {personaPrefix: 'PRIVATE APP PERSONA', personaSuffix: 'PRIVATE APP SUFFIX'});
     await mount(tools.ToolRuntime);
+    // 0.2.2 hosts dispatch tool calls through a mounted executor instead of the
+    // registry's built-in native path; older hosts have no such package.
+    const nativeExecutor = await hostModule('dsh-tool-executor-native').catch(() => undefined);
+    if (nativeExecutor) await mount(nativeExecutor.default ?? nativeExecutor);
     await mount(projections.SessionProjectionRegistry);
     await mount(llm.LlmRuntime);
     await mount(persistence, {root: directory, compression: 'none'});
@@ -60,7 +64,17 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     let adapter: InstanceType<typeof runtime.DshRuntime>;
     const owner = await mount({name: 'test-bot-owner', inject: ['agents', 'tools', 'sessions', 'sessionPersistence', 'systemPrompt'],
       apply(ctx: unknown) { adapter = new runtime.DshRuntime(ctx); }});
-    return {root, owner, adapter: adapter!, requests, started, runtime, prompts, tools, llm, mount, close: () => root.fiber.dispose()};
+    const registry = root.get('tools') as unknown as {execute(input: unknown): Promise<unknown>};
+    let callSeq = 0;
+    // 0.2.2 tool calls are batch inputs ({calls:[...]}) that settle into a
+    // batch result; older hosts take one call and return one result.
+    const executeTool = async (agent: unknown, name: string, args: unknown = {}, explicitCallId?: string) => {
+      const callId = explicitCallId ?? `test-${name}-${++callSeq}`;
+      if (!nativeExecutor) return registry.execute({callId, name, arguments: args, agent, signal: new AbortController().signal}) as Promise<{isError: boolean}>;
+      const settlement = await registry.execute({calls: [{id: callId, name, arguments: JSON.stringify(args)}], agent, signal: new AbortController().signal}) as {results: Array<{result: {isError: boolean}}>};
+      return settlement.results[0]!.result;
+    };
+    return {root, owner, adapter: adapter!, requests, started, runtime, prompts, tools, llm, mount, executeTool, close: () => root.fiber.dispose()};
   }
 
   it('normalizes an inbound image through real attachment storage and restores its durable native reference', async () => {
@@ -182,8 +196,10 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
     // What the App host adds: its per-session model record and the default its selector saves.
     const appHost = async () => {
       const host = await createHost(directory); hosts.push(host);
-      const projection = await load('node_modules/@deepseek-ai/dsh-api-session-controller/lib/types/model-selection-projection.js');
-      projection.installModelSelectionProjection(host.root);
+      // Older hosts install the model-selection projection from this App module;
+      // from 0.2.2 the agent loop registers the same definition itself.
+      const projection = await load('node_modules/@deepseek-ai/dsh-api-session-controller/lib/types/model-selection-projection.js').catch(() => undefined);
+      projection?.installModelSelectionProjection(host.root);
       const saved: unknown[] = [];
       const fiber = host.root.plugin({name: 'test-default-model', apply(ctx: {provide(name: string, value: unknown): void}) {
         ctx.provide('agentDefaultModel', {currentSelection: () => ({provider: 'offline', model: 'offline'}), saveSelection: async (next: unknown) => { saved.push(next); }});
@@ -309,7 +325,7 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
       const agent = host.root.get('agents').get(session.id);
       const scoped = agent.ctx.get('tools');
       scoped.register(tool('late_privileged_tool'));
-      const execute = (name: string) => tools.execute({callId: host.llm.ToolCallId(name), name, arguments: {}, agent, signal: new AbortController().signal});
+      const execute = (name: string) => host.executeTool(agent, name);
       expect((await execute('safe_lookup')).isError).toBe(false);
       expect((await execute('bash')).isError).toBe(true);
       expect((await execute('late_privileged_tool')).isError).toBe(true);
@@ -358,10 +374,7 @@ describe.skipIf(!hostRoot)('DshRuntime with the official 0.2 host', () => {
       const policy = {cwd: '/tmp/lark-modern-user', allowedTools: [], provider: 'offline', model: 'offline'};
       const alice = await host.adapter.create({...policy, memory});
       const bob = await host.adapter.create({...policy, cwd: '/tmp/lark-modern-bob', memory: empty});
-      const execute = (id: string, name: string, args: unknown) => host.root.get('tools').execute({
-        callId: host.llm.ToolCallId(`${id}-${name}`), name, arguments: args,
-        agent: host.root.get('agents').get(id), signal: new AbortController().signal,
-      });
+      const execute = (id: string, name: string, args: unknown) => host.executeTool(host.root.get('agents').get(id), name, args);
       expect((await execute(alice.id, 'lark_memory_remember', {text: 'ALICE FACT {{fake_instruction}}'})).isError).toBe(false);
       expect(saved[0]?.groupShared).toBe(false);
       expect(JSON.stringify(await execute(alice.id, 'lark_memory_list', {}))).toContain('ALICE FACT');

@@ -28,6 +28,10 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
       await mount(prompts.SystemPrompt, family === 'modern'
         ? {personaPrefix: 'PRIVATE HOST PERSONA', personaSuffix: 'PRIVATE HOST SUFFIX'} : {persona: 'PRIVATE HOST PERSONA'});
       await mount(tools.ToolRuntime);
+      // 0.2.2 hosts dispatch tool calls through a mounted executor instead of
+      // the registry's built-in native path; older hosts have no such package.
+      const nativeExecutor = await module('dsh-tool-executor-native').catch(() => undefined);
+      if (nativeExecutor) await mount(nativeExecutor.default ?? nativeExecutor);
       await mount(projections.SessionProjectionRegistry);
       await mount(llm.LlmRuntime);
       await mount(persistence.default ?? persistence, {root: directory, compression: 'none'});
@@ -62,7 +66,23 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
       let adapter: InstanceType<typeof runtime.DshRuntime>, ownerContext: unknown;
       await mount({inject: ['agents', 'tools', 'sessions', 'sessionPersistence', 'systemPrompt'],
         apply(ctx: unknown) {ownerContext = ctx; adapter = new runtime.DshRuntime(ctx);}});
-      return {root, adapter: adapter!, requests, metadataReads, toolApi: tools, llmApi: llm, promptApi: prompts, load, mount,
+      const registry = root.get('tools') as unknown as {execute(input: unknown): Promise<unknown>};
+      let callSeq = 0;
+      // 0.2.2 tool calls are batch inputs ({calls:[...]}) that settle into a
+      // batch result; older hosts take one call and return one result.
+      const executeTool = async (agent: unknown, name: string, args: unknown = {}, explicitCallId?: string) => {
+        const callId = explicitCallId ?? `test-${name}-${++callSeq}`;
+        if (!nativeExecutor) return registry.execute({callId, name, arguments: args, agent, signal: new AbortController().signal}) as Promise<{isError: boolean}>;
+        const settlement = await registry.execute({calls: [{id: callId, name, arguments: JSON.stringify(args)}], agent, signal: new AbortController().signal}) as {results: Array<{result: {isError: boolean}}>};
+        return settlement.results[0]!.result;
+      };
+      return {root, adapter: adapter!, requests, metadataReads, toolApi: tools, llmApi: llm, promptApi: prompts, load, mount, executeTool,
+        // 0.2.2+ exports AgentModel and fixes each step's model at pre-step
+        // time; older modern hosts apply the plugin's live selection ref while
+        // the step is preparing. Use the exported API as an independent signal
+        // from the arity heuristic the production code relies on.
+        hostOwnsStepModel: 'AgentModel' in agents,
+        arityHostOwnsStepModel: agents.installModelSelection.length < 2,
         async checkConnection() {
           const {checkConnectionModel} = await load('onboarding/model-check.js');
           await checkConnectionModel(ownerContext, {provider: 'offline', model: 'plain'}, new AbortController().signal);
@@ -140,8 +160,18 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
           .resolves.toBe('offline answer\n\noffline answer');
         expect(continuation?.pending).toBe(false);
         expect(host.requests).toHaveLength(3);
+        // The production arity heuristic must agree with the host-exported
+        // signal; a future host that diverges fails here instead of passing
+        // both the plugin and this fixture with the same wrong assumption.
+        expect(host.hostOwnsStepModel).toBe(host.arityHostOwnsStepModel);
+        // A 0.2.2 host fixes the running step's model at pre-step time, so the
+        // queued switch applies from the following step; older modern hosts
+        // read the plugin's live selection while that step is preparing.
+        const expected = host.hostOwnsStepModel
+          ? [['plain', undefined], ['reasoned', 'deep']]
+          : [['reasoned', 'deep'], ['reasoned', 'deep']];
         expect(host.requests.slice(1).map((request: ModelSelection) => [request.model, request.reasoningEffort]))
-          .toEqual([['reasoned', 'deep'], ['reasoned', 'deep']]);
+          .toEqual(expected);
         expect(JSON.stringify(host.requests.at(-1))).toContain('a new question');
         release();
         await session.dispose();
@@ -214,8 +244,8 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
           {type: 'finish', reason: {kind: 'completed'}},
         ]);
         host.nextRequest(async () => {
-          const result = await host.root.get('tools').execute({agent, name: 'lark_present', callId: 'present-harness', signal: new AbortController().signal,
-            arguments: {kind: 'chart', title: '示例数据', summary: '离线示例。', content: '{"type":"bar","series":["计数"],"data":[{"label":"A","values":[2]}]}'}});
+          const result = await host.executeTool(agent, 'lark_present',
+            {kind: 'chart', title: '示例数据', summary: '离线示例。', content: '{"type":"bar","series":["计数"],"data":[{"label":"A","values":[2]}]}'}, 'present-harness');
           expect(result.isError).toBe(false);
         });
         const events: unknown[] = [];
@@ -235,8 +265,8 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
         const agent = host.root.get('agents').get(session.id);
         expect(host.root.get('tools').schemas(agent).map((tool: {name: string}) => tool.name)).toEqual(['lark_present']);
         host.nextRequest(async () => {
-          const result = await host.root.get('tools').execute({agent, name: 'lark_present', callId: 'present-fixture', signal: new AbortController().signal,
-            arguments: {kind: 'chart', title: '示例数据', summary: '离线示例，只有一个类别。', content: '{"type":"bar","series":["计数"],"data":[{"label":"A","values":[2]}]}'}});
+          const result = await host.executeTool(agent, 'lark_present',
+            {kind: 'chart', title: '示例数据', summary: '离线示例，只有一个类别。', content: '{"type":"bar","series":["计数"],"data":[{"label":"A","values":[2]}]}'}, 'present-fixture');
           expect(result.isError).toBe(false);
         });
         expect(await session.run('显示图表', new AbortController().signal)).toMatchObject({text: 'offline answer', artifacts: [{kind: 'chart'}]});
@@ -400,8 +430,7 @@ for (const [family, hostRoot] of [['legacy', process.env.DSH_LEGACY_HOST_ROOT],
         expect(agent.session.header).toMatchObject({cwd: policy.cwd, parentSession: saved.id, isSeeded: true});
         expect(agent.session.snapshotEvents().slice(0, originalEvents.length)).toEqual(originalEvents);
         agent.ctx.get('tools').register(tool('late_private_tool'));
-        const execute = (name: string, args = {}) => host.root.get('tools').execute({
-          callId: host.llmApi.ToolCallId(`${fork.id}-${name}`), name, arguments: args, agent, signal: new AbortController().signal});
+        const execute = (name: string, args = {}) => host.executeTool(agent, name, args);
         expect((await execute('safe_lookup')).isError).toBe(false);
         expect((await execute('host_private_tool')).isError).toBe(true);
         expect((await execute('late_private_tool')).isError).toBe(true);

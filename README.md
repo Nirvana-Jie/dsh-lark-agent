@@ -16,7 +16,7 @@ dsh-lark-agent adds a Feishu / Lark private chat to a running DeepSeek Harness: 
 
 Before you start:
 
-- DeepSeek Harness is running, can chat, and has a default model selected: PC App `0.2.1-rc.5` (`0.2.1-rc.2` and `rc.3` also work), or Web / `dsh` CLI `0.1.1-rc.2`.
+- DeepSeek Harness is running, can chat, and has a default model selected: PC App `0.2.2-rc.1` (`0.2.1-rc.2`, `rc.3` and `rc.5` also work), or Web / `dsh` CLI `0.1.1-rc.2`.
 - The official Lark CLI is installed on the same machine **before** you enable the plugin (needs Node.js / npm):
 
   ```sh
@@ -35,7 +35,7 @@ In the sidebar, open **插件 → 添加插件** (Plugins → Add plugin), enter
 [`dsh plugin`](https://www.npmjs.com/package/@deepseek-ai/dsh) runs pnpm, so pnpm must be on your PATH:
 
 ```sh
-dsh plugin --profile web add dsh-lark-agent@0.6.2 --allow-build=protobufjs
+dsh plugin --profile web add dsh-lark-agent@0.6.3 --allow-build=protobufjs
 ```
 
 Then restart `dsh web`.
@@ -53,7 +53,7 @@ Then restart `dsh web`.
 
 When a new version has been out for a day, the Feishu settings page shows a notice with these steps (in the desktop app it also opens the plugin list for you). Until then, installs without an exact version, including `@latest`, still select the previous version because pnpm 11 skips releases less than 24 hours old. Use the exact version in the installation example above to install this release immediately after publication. If an install picks an older version that your DeepSeek Harness rejects as incompatible, see [Troubleshooting](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#排障).
 
-App `0.2.1-rc.5` requires plugin `0.6.1` or later; plugin `0.6.0` only declares support through rc.3. Use the installation command above after publication, or use a [source-built package](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#开发与测试).
+Plugin `0.6.2` and earlier list exact DSH versions, so App `0.2.2-rc.1` shows the plugin as incompatible with the current dsh and the host skips the plugin. Plugin `0.6.3` switches to one host range (`engines.dsh`) and adapts to the 0.2.2 runtime: update to `0.6.3` once, then DSH 0.x patch and release-candidate updates no longer need a new plugin release. Use the installation command above after publication, or use a [source-built package](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#开发与测试).
 
 1. On the Feishu settings page, click **暂停连接** (pause) and back up as described in [Upgrade](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md#升级).
 2. Desktop app: the Add plugin dialog says third-party plugins must be uninstalled before a new version is installed, so uninstall `dsh-lark-agent` on the Plugins page and add it again (upgrading with a local build was verified on rc.5; an earlier source build is listed as `dsh-larkbot`). CLI: run `dsh plugin --profile web update dsh-lark-agent@latest`, then restart `dsh web`.
@@ -98,7 +98,7 @@ A new request in the main chat opens a topic; continue inside that topic to keep
 ## Good to know
 
 - **More docs**: commands, privacy, upgrades, the chat bottom menu, team deployment and troubleshooting are in [DEVELOPMENT.md](https://github.com/Nirvana-Jie/dsh-lark-agent/blob/main/DEVELOPMENT.md) (Chinese).
-- **Compatibility**: fully verified with PC App `0.2.1-rc.2` and `dsh` CLI / Web `0.1.1-rc.2`. PC App `0.2.1-rc.3` passes the real-host contract tests, and the plugin loads and connects on it (first-time QR setup on rc.3 is not tested yet). On PC App `0.2.1-rc.5`, real-host contract tests, a local-package upgrade, plugin loading, restoring and pausing/resuming the existing connection, and host restart are verified; first-time QR setup and real private-chat replies on rc.5 are not tested yet. Other versions, platforms and tenants are not yet verified.
+- **Compatibility**: fully verified with PC App `0.2.1-rc.2` and `dsh` CLI / Web `0.1.1-rc.2`. PC App `0.2.1-rc.3` and `rc.5` pass the real-host contract tests and load the plugin (first-time QR setup on rc.3/rc.5 is not tested). On PC App `0.2.2-rc.1`, the real-host contract tests pass for session creation and restore, shared model records, native tools, approvals and questions, persistence and fork/recovery; first-time QR setup, real private-chat replies, pause/resume and host restart on rc.1 are not tested yet. The plugin declares one `engines.dsh` 0.x range, so DSH 0.x updates need no new plugin release; a DSH 1.0 release or a breaking native change still does. Other versions, platforms and tenants are not yet verified.
 - **Language**: the settings page, the bot's built-in messages (`/help`, status text, card buttons, bottom menu) and the intro video are in Chinese.
 
 ## License
