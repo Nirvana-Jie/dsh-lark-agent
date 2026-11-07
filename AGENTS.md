@@ -41,11 +41,12 @@
 
 表中简写测试名对应 `tests/<名称>.test.ts` 或 `.test.tsx`；onboarding 行的省略路径均在 `src/onboarding/`。修改接入、打包或运行脚本时，同步中英文 README / DEVELOPMENT.md 中的可复制步骤；修改用户可见行为时，同步中英文 README、DEVELOPMENT.md、基础帮助和模型表达。
 
-宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` / `rc.3` / `rc.5` 的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
+宿主连接适配需区分两代接口：旧 Web 的自定义 RPC 使用 loopback 限制；App `0.2.1-rc.2` 起的 App 0.2.x（已验证到 `0.2.2-rc.1`）的设置操作使用公开、仅 owner 可访问的精确 Fetch 路由。不要用放宽 Origin、绕开认证或对修改请求做自动 fallback 重试来解决兼容问题。安装了官方 App 时，`client-modern-host` 会直接验证真实宿主的鉴权与路由契约；运行前构建源码，也可用 `DSH_TEST_HOST_MODULE` 指向独立构建的 `onboarding/host.js`。
 
 ## 接入与宿主契约
 
 - `configFile` / `DSH_LARK_CONFIG` 有值时加载显式团队配置；留空时注册连接设置。两条入口复用 `createBotService`，保持相同准入、持久化和关闭规则。
+- 宿主版本要求只写在 `package.json` 顶层 `engines.dsh` 的一条范围里，`@deepseek-ai/dsh-*` peer 使用同一范围；宿主管线存在该字段时只按它判定并忽略 peer，因此不要恢复精确版本枚举。0.x 内补丁/rc 更新不需要发版；只有宿主进入 1.0、或真实依赖验证发现接口不兼容而需要修代码并调整范围时才发版。新增宿主线前从官方 App 提取隔离依赖树（`app.asar` 的 `dsh/node_modules` 与 `app.asar.unpacked` 原生模块），运行 `DSH_MODERN_HOST_ROOT=<fixture> pnpm test:compat`，并让 `host-gate-compat`（真实 `evaluatePluginCompatibility`）与 `host-requirements` 用例保持通过。`0.2.2` 起 per-scope `tools.presentAs` 改为挂载工具执行器，模型选择由 agent loop 原生路由（`agentOptions` 携带 reasoning effort、`model/selection` 记录），工具调用为批量 `execute({calls})` 且组合需挂载 `dsh-tool-executor-native`；改会话创建、模型或工具接入时同时覆盖 `0.2.1-rc.2`–`rc.5` 与 `0.2.2+`。
 - 控制面只允许宿主所有者访问：旧 RPC 保留 loopback 授权，新 RPC 校验 owner principal。UI 只传协议列出的操作字段，不接受任意配置路径、身份或密钥。
 - 多机器人沿用原目录作为 `default`，新增入口只接受服务端生成的 ID。列表修改与命令准入串行；移除前确认该连接已停止，保留资料和 CLI 凭据。入口改绑机器人时先保留新身份，替换记录可靠保存后才释放旧身份；保存结果不确定时保留两者。Agent 与工作区设置在暂停后保存，新会话记录选择，旧 Harness 私聊会话保留原预设和工作区；受限会话继续服从当前管理员配置。App 的一级「飞书 agent」使用公开 `settings.section`，旧 Web 仍用 `settings.plugins.tab`。
 - 设置页按插件内容区宽度响应，不能用整个窗口宽度推断嵌入面板布局。消息输入开关与能力就绪分开：展示宿主附件、模型图片能力、FFmpeg 和飞书权限，未知能力不冒充已验证。图片/语音增补授权只接受固定特性枚举，按已验证机器人的专用 profile 用官方扫码增补固定 bot scopes；回读身份和权限后才标记就绪，取消不停止服务、不重新配对，不自动启用输入。
@@ -56,7 +57,7 @@
 - Harness 模式只用于已验证本人的私聊（运行时对非私聊策略拒绝创建），飞书只是该 Harness 会话的入口：保留宿主人设、运行时上下文、工具、展示模式与权限策略，只追加 `lark-channel` 渠道段。宿主审批和提问由插件按 agent 作用域监听，转成签名卡片发给本人；卡片答复绕过会话队列（运行中的回合正占着它），按 ID 一次有效并校验操作者与聊天，超时、取消或卡片不可用一律拒绝。旧宿主的提问只有全局浏览器提供方，Harness 模式下隐藏 `ask_user_question`，由模型在回复里提问。会话按宿主的 agent 预设组成（新会话记录默认预设，恢复时用记录的或默认的），受限会话不加入预设。
 - Harness 子智能体回传唤起的主会话续跑也归原话题队列：在公开提示词组装接口等待准入、加载当前渠道上下文并安装交互监听，原生 checkpoint 后复用回复与交付流程。续跑绑定精确原生 Session 和服务端保存的原话题，以原生会话／回合标识去重；不重复提交用户输入、不转发其他 agent 的日志、不扩展到群聊。取消、容量拒绝和关闭须释放等待组装的宿主，保存结果不确定时停止访问。
 - 权限模式只在本人 Harness 私聊切换，目录取自公开 `permissionPresets.catalog()`。话题内的选择只作用于该逻辑话题并与同一原生会话同步；恢复时保留原生记录，App 的修改不传播到兄弟话题或默认。新话题在创建入口时捕获权限默认，旧版私聊选择只作为新话题默认的迁移来源。旧宿主没有目录时不显示该选项。设置卡先编辑内存草稿，保存时重新校验目录、话题、会话和设置 revision，原生 checkpoint 后将模型与权限作为同一快照持久化；过期卡片只刷新，结果不确定时停止访问。
-- 双宿主通过公开能力适配。保留 legacy persona/readFrom 与 modern prefix/snapshotEvents/open-read 的分支；现代 required cwd 取自当前 Agent。更新 peer 范围前，在对应真实宿主依赖上验证，不能只改版本字符串或跳过安全能力。
+- 双宿主通过公开能力适配。保留 legacy persona/readFrom 与 modern prefix/snapshotEvents/open-read 的分支；现代 required cwd 取自当前 Agent。更新宿主范围下限/上限前，在对应真实宿主依赖上验证，不能只改版本字符串或跳过能力检测。
 - 自动接入状态按宿主代际及 home 分目录；原生持久化跟随宿主。跨代迁移需明确验证，不复用旧后台状态或混写原生日志。
 - 项目、仓库与 npm 包名为 `dsh-lark-agent`；插件 ID 与日志前缀 `im-larkbot`、数据目录 `~/.dsh-larkbot/`、RPC 路径 `larkbot`、设置页与样式 ID、应用注册来源、launchd 标签和构建环境变量沿用旧名。改这些运行标识会让已有安装丢失配置、状态或后台服务，或破坏设置页与宿主的契约，须先设计并验证迁移。
 - 模型目录与思考档位来自宿主公开接口。App 宿主的本人 Harness 私聊与 App 中同一原生会话共用模型记录；话题内修改追加 `model/selection` 并 checkpoint，仅修改该话题。只有明确修改「新话题默认」（含主聊天 `/model` / `/thinking`）才调用 `agentDefaultModel.saveSelection`；失败报错。新话题创建入口时捕获默认，首次创建原生会话时记录这份选择；已保存的会话以自己的原生记录为准。按钮 revision 在同步共享记录和重新打开会话之后校验。旧宿主、受限模式和管理员固定路由按原用户／聊天／话题保存，不改宿主全局默认。保存结果不确定时停止推理。
@@ -102,6 +103,6 @@
 
 探测 `dsh plugin` 命令时使用 `.runtime/` 下的临时 `DSH_HOME`；该子命令即使只传 `--help`，也可能先初始化目标 profile。
 
-现代宿主矩阵由 `DSH_MODERN_HOST_ROOT` 指向隔离依赖目录启用，目录约定见 `tests/dsh-runtime-modern.test.ts`；使用当前编译产物和真实宿主包，未准备 fixture 时明确报告该矩阵未执行。界面组件测试与原生契约通过不等于真实扫码完成：交付前分别验证插件加载、官方扫码 / 审批、本人私聊配对与确认回复、暂停恢复和宿主重启。
+现代宿主矩阵由 `DSH_MODERN_HOST_ROOT` 指向隔离依赖目录启用，目录约定见 `tests/dsh-runtime-modern.test.ts`；使用当前编译产物和真实宿主包，现有契约在 `0.2.1-rc.2` / `rc.3` / `rc.5` / `0.2.2-rc.1` 上验证，未准备 fixture 时明确报告该矩阵未执行。界面组件测试与原生契约通过不等于真实扫码完成：交付前分别验证插件加载、官方扫码 / 审批、本人私聊配对与确认回复、暂停恢复和宿主重启。
 
 源码插件可能正通过软链接加载本仓库的 `dist/`。静态文档治理不重建或重启服务；需部署代码时按 DEVELOPMENT.md 正常停止、备份、构建、启动并检查就绪。独立构建同时运行 `pnpm exec tsc -p tsconfig.json --outDir .runtime/check-build` 和 `pnpm build:client --outdir .runtime/check-build`，核对宿主 JS、客户端入口及必需 runtime imports 均保留。

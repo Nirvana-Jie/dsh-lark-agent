@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { symbols, type Context } from '@deepseek-ai/cordis';
-import { installModelSelection, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent';
+import { installModelSelection, type AgentHandle, type CreateAgentOptions, type ModelSelectionRef } from '@deepseek-ai/dsh-agent';
 import { createUserMessage, ReasoningEffortId, type LlmRuntime } from '@deepseek-ai/dsh-llm';
 import { SessionId, type Session, type SessionEvent, type SessionStore } from '@deepseek-ai/dsh-session';
 import * as sessionModule from '@deepseek-ai/dsh-session';
@@ -555,7 +555,10 @@ export function checkRuntimeCompatibility(ctx: Context): {
     return value;
   };
   needs('agents', ['create', 'resume']);
-  needs('tools', ['presentAs', 'restrict', 'guard', 'register']);
+  // Scope presentation is optional: hosts before 0.2.2 select it with
+  // tools.presentAs(), newer hosts select it by mounting a tool executor and
+  // expose no scoped selector. Scoped restrictions are what this plugin needs.
+  needs('tools', ['restrict', 'guard', 'register']);
   needs('sessions', ['flush']);
   const prompt = needs('systemPrompt', ['section', 'suppressRuntimeContext', 'variable']);
   const persistence = ctx.get('sessionPersistence') as PersistenceReader | undefined;
@@ -768,6 +771,11 @@ export class DshRuntime {
     let hostTurn = 0;
     let continuationHandler: ((turn: RuntimeContinuation) => Promise<void>) | undefined;
     let continuation: {ready(accepted: boolean): void; adopt(turn: ActiveTurn): void; cancel(): void} | undefined;
+    // From 0.2.2 the host owns per-step model routing and the selection record:
+    // agentOptions carry the route (including reasoning effort), and a recorded
+    // model/selection event changes later steps. Older modern hosts need the
+    // plugin's own installModelSelection hooks instead (see setup below).
+    const nativeModelSelection = (installModelSelection as unknown as {length: number}).length < 2;
     // A restricted session, or one on an administrator's fixed route, keeps that route.
     // A harness session on the App host follows its own record once it exists (see sharesModelSelection).
     const projections = harness && !(policy.provider && policy.model) ? sessionProjections(this.ctx) : undefined;
@@ -828,6 +836,10 @@ export class DshRuntime {
         choice = await modelRead(signal => this.effectiveSelection(choice, llm, signal));
       }
       selected.current = nativeSelection(choice);
+      // A 0.2.2 host resolves the route from agentOptions, so the effort must
+      // travel with it; older hosts get it through installModelSelection.
+      const selectionOptions = {provider, model,
+        ...(nativeModelSelection && effort !== undefined ? {reasoningEffort: String(effort)} : {})} as CreateAgentOptions['agentOptions'];
       // A harness session is composed like the App's own: the host's agent
       // preset supplies its tools, skills and prompt sections. A new session
       // records the default; a restricted session never joins a preset.
@@ -845,7 +857,7 @@ export class DshRuntime {
           }
           if (presets && presetId) await presets.mount(agentCtx, presetId);
           const tools = agentCtx.get('tools') as ToolRuntime | undefined;
-          if (!tools || typeof tools.presentAs !== 'function' || typeof tools.restrict !== 'function' || typeof tools.guard !== 'function') {
+          if (!tools || typeof tools.restrict !== 'function' || typeof tools.guard !== 'function') {
             throw new Error('The host does not support scoped tool restrictions');
           }
           const prompt = agentCtx.get('systemPrompt') as ScopedPrompt | undefined;
@@ -873,7 +885,12 @@ export class DshRuntime {
             prompt.suppressRuntimeContext();
             // Restrictions cover inherited tools. The monotonic guard also covers
             // tools registered in this agent's own scope after creation.
-            tools.presentAs('native');
+            // Hosts before 0.2.2 choose the presentation per scope here. Newer
+            // hosts choose it by mounting a tool executor (dsh-tool-executor-native
+            // or -ptc) and have no scoped selector; then the deployment default
+            // applies. Restrictions below still mask every inherited tool.
+            const presentAs = (tools as {presentAs?: (mode: 'native') => unknown}).presentAs;
+            if (typeof presentAs === 'function') presentAs.call(tools, 'native');
             tools.restrict({ allow: [...policy.allowedTools] });
           }
           if (policy.memory) memoryTools(tools, policy.memory, async () => {
@@ -1018,12 +1035,15 @@ export class DshRuntime {
             tools.guard((execution) => allowed.has(execution.name) ? undefined : '此用户未获准使用该工具。');
             channelCtx.on('approval/request', async () => 'rejected', { prepend: true });
           }
-          // The native helper keeps prompt variables and request routing on one
-          // immutable per-step snapshot; a cleared effort does not leak the old value.
-          installModelSelection(agentCtx, selected);
+          // Hosts before 0.2.2 need this helper to route the per-step model and to
+          // record the change notice; from 0.2.2 the loop owns both natively and
+          // the helper only installs the change notice (one argument).
+          const installSelection = installModelSelection as unknown as (scope: Context, selection?: unknown) => unknown;
+          if (nativeModelSelection) installSelection(agentCtx);
+          else installSelection(agentCtx, selected);
         };
       if (resumeId) {
-        try {handle = await this.ctx.agents.resume({resumeSessionId: SessionId(resumeId), agentOptions: {provider, model}, setup});}
+        try {handle = await this.ctx.agents.resume({resumeSessionId: SessionId(resumeId), agentOptions: selectionOptions, setup});}
         catch (error) {
           const OwnedError = modernOwnership.SessionAlreadyOwnedError;
           const persistence = this.ctx.get('sessionPersistence') as PersistenceReader | undefined;
@@ -1056,13 +1076,13 @@ export class DshRuntime {
             sessionId: SessionId(randomUUID()), seed: modernFork.buildForkSeed(events, boundary),
             inheritedEventCount: boundary + 1,
             meta: {cwd: policy.cwd, parentSession: SessionId(resumeId), isSeeded: true, ...(presetId ? {agentPreset: presetId} : {})},
-            agentOptions: {provider, model}, setup,
+            agentOptions: selectionOptions, setup,
           };
           handle = await this.ctx.agents.create(forkOptions);
         }
       } else {
         handle = await this.ctx.agents.create({
-          sessionId: SessionId(randomUUID()), meta: {cwd: policy.cwd, ...(presetId ? {agentPreset: presetId} : {})}, agentOptions: {provider, model}, setup,
+          sessionId: SessionId(randomUUID()), meta: {cwd: policy.cwd, ...(presetId ? {agentPreset: presetId} : {})}, agentOptions: selectionOptions, setup,
           // An explicit empty seed emits a non-conversational end-seed event.
           // This makes checkpoint() materialize a new empty native log before
           // the bridge publishes its persistent ownership/catalog reference.
@@ -1077,7 +1097,8 @@ export class DshRuntime {
     const agent = handle.agent;
     const attachmentService = this.ctx.get('attachments') as {saveImages?(inputs: ImageInput[]): Promise<Array<Extract<import('@deepseek-ai/dsh-llm').ContentBlock, {type: 'image'}>['attachment']>>} | undefined;
     const modelService = this.ctx.get('llm') as ModelService | undefined;
-    if (projections && sessionChoice(projections, agent.session, defaultModel)) shared = agent.session;
+    if (harness && nativeModelSelection) shared = agent.session;
+    else if (projections && sessionChoice(projections, agent.session, defaultModel)) shared = agent.session;
     // Keep this capability while the owner is active. Cordis unloads sibling
     // effects concurrently, so native agent teardown may detach this session
     // before the bridge's teardown reaches it.
@@ -1279,8 +1300,10 @@ export class DshRuntime {
         if (disposed) throw new DshRuntimeError('DISPOSED');
         if (active || (agent.status === 'running' && !continuation)) throw new DshRuntimeError('BUSY');
         const choice = nativeSelection(modelSelection(next));
-        if (!shared) { selected.current = choice; return; }
-        // Recorded like the App selector's own pick, so the App shows it as this session's model.
+        fixed = choice;
+        if (!nativeModelSelection && !shared) return;
+        // Recorded like the App selector's own pick: a 0.2.2 host routes later
+        // steps from this record, and an App host shows it as the session model.
         // Older SDK typings predate this event; only a host with the record gets here.
         try {
           (agent.session as unknown as {append(type: string, data: unknown): unknown}).append('model/selection', {provider: choice.provider, model: choice.model,

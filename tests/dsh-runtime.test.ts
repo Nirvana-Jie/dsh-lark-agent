@@ -347,6 +347,26 @@ describe('DshRuntime', () => {
     expect(readFrom).not.toHaveBeenCalled();
   });
 
+  it('accepts hosts whose tool presentation is selected elsewhere', () => {
+    const f = fixture();
+    (f.tools as {presentAs?: unknown}).presentAs = undefined;
+    const services = {agents: {create: f.create, resume: f.resume}, tools: f.tools, sessions: {flush: f.flush},
+      systemPrompt: f.prompt, sessionPersistence: {readFrom: vi.fn()}};
+    const context = {get: (name: string) => services[name as keyof typeof services]} as unknown as Context;
+    // 0.2.2 selects presentation by mounted executor; only scoped restrictions
+    // and guards remain required.
+    expect(checkRuntimeCompatibility(context)).toEqual({supported: true, family: 'legacy', missing: []});
+  });
+
+  it('creates a restricted session when the host has no scoped presentation selector', async () => {
+    const f = fixture();
+    (f.tools as {presentAs?: unknown}).presentAs = undefined;
+    await f.runtime.create({...basePolicy, allowedTools: ['safe_lookup'], provider: 'host-provider', model: 'host-model'});
+    expect(f.create).toHaveBeenCalledOnce();
+    expect(f.tools.restrict).toHaveBeenCalledWith({allow: ['safe_lookup']});
+    expect(f.tools.guard).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['complete', 'missing-event', 'wrong-owner', 'read-failure', 'close-failure'] as const)('checks modern durable snapshots and closes readers (%s)', async mode => {
     const f = fixture();
     const events = [{seq: 0, type: 'session/end-seed', data: {}}] as unknown as SessionEvent[];

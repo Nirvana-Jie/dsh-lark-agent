@@ -5,6 +5,7 @@ const compatibilityTests = [
   'tests/client-modern-host.test.tsx',
   'tests/dsh-runtime-modern.test.ts',
   'tests/dsh-runtime-model-native.test.ts',
+  'tests/host-gate-compat.test.ts',
 ];
 
 export default defineConfig({
